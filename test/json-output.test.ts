@@ -96,6 +96,26 @@ test("drops an oversized unterminated malformed record before finish and recover
   assert.equal(parser.malformedCount, 1);
 });
 
+test("resets UTF-8 decoder state after an oversized unterminated record", () => {
+  const parser = new JsonLineParser();
+  const incompleteCharacter = Buffer.from("😀").subarray(0, 2);
+  const oversized = Buffer.concat([
+    Buffer.alloc(CAPTURED_TEXT_MAX_BYTES + 1, "a"),
+    incompleteCharacter,
+  ]);
+
+  assert.deepEqual(parser.push(oversized), []);
+  assert.equal(parser.malformedCount, 1);
+
+  const recovered = parser.push(Buffer.from(`${JSON.stringify({ ok: true })}\n`));
+  assert.deepEqual(
+    { recovered, malformedCount: parser.malformedCount },
+    { recovered: [{ ok: true }], malformedCount: 1 },
+  );
+  assert.deepEqual(parser.finish(), []);
+  assert.equal(parser.malformedCount, 1);
+});
+
 test("truncates without splitting UTF-8 characters", () => {
   const result = truncateUtf8("a😀b", 5);
 

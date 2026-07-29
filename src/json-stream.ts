@@ -2,7 +2,7 @@ import { StringDecoder } from "node:string_decoder";
 import { CAPTURED_TEXT_MAX_BYTES, MALFORMED_EVENT_SAMPLE_MAX_BYTES, truncateUtf8 } from "./output.ts";
 
 export class JsonLineParser {
-  private readonly decoder = new StringDecoder("utf8");
+  private decoder = new StringDecoder("utf8");
   private pending = "";
   private _malformedCount = 0;
   private readonly _malformedSamples: string[] = [];
@@ -28,7 +28,10 @@ export class JsonLineParser {
     const pending = finished ? "" : records.pop() ?? "";
     this.pending = pending;
     const oversizedPending = !finished && Buffer.byteLength(pending, "utf8") > CAPTURED_TEXT_MAX_BYTES;
-    if (oversizedPending) this.pending = "";
+    if (oversizedPending) {
+      this.pending = "";
+      this.decoder = new StringDecoder("utf8");
+    }
 
     return [
       ...records.flatMap((record) => this.parse(record)),
