@@ -11,8 +11,15 @@ export async function loadConfig(configPath: string): Promise<LoadConfigResult> 
 
   try {
     raw = await readFile(configPath, "utf8");
-  } catch {
-    return { config: { confirmWrites: false } };
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return { config: { confirmWrites: false } };
+    }
+
+    return {
+      config: { confirmWrites: true },
+      warning: `Failed to read config ${configPath}: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
 
   let parsed: unknown;

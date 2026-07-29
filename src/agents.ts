@@ -72,7 +72,14 @@ export async function discoverAgents(agentsDir: string): Promise<DiscoverAgentsR
   let entries;
   try {
     entries = await readdir(agentsDir, { withFileTypes: true });
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return { agents, diagnostics };
+    }
+
+    diagnostics.push(
+      `Failed to read agent directory ${agentsDir}: ${error instanceof Error ? error.message : String(error)}`,
+    );
     return { agents, diagnostics };
   }
 
@@ -91,7 +98,17 @@ export async function discoverAgents(agentsDir: string): Promise<DiscoverAgentsR
       continue;
     }
 
-    const { frontmatter, body } = parseFrontmatter<Record<string, unknown>>(content);
+    let frontmatter: Record<string, unknown>;
+    let body: string;
+    try {
+      ({ frontmatter, body } = parseFrontmatter<Record<string, unknown>>(content));
+    } catch (error) {
+      diagnostics.push(
+        `Failed to parse frontmatter in ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      continue;
+    }
+
     const agent = createAgent(filePath, frontmatter, body);
 
     if (!agent) {

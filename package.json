@@ -9,7 +9,7 @@
   "pi": { "extensions": ["./src/index.ts"] },
   "scripts": {
     "test": "tsx --test test/*.test.ts",
-    "test:unit": "tsx --test $(find test -maxdepth 1 -name '*.test.ts' | sort)",
+    "test:unit": "tsx --test test/config-agents.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {

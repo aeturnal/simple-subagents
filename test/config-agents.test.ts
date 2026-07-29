@@ -16,6 +16,17 @@ test("missing config falls back safely", async () => {
   assert.equal(result.warning, undefined);
 });
 
+test("config read failures other than missing file fail safe", async () => {
+  const root = await mkdtemp(join(tmpdir(), "simple-subagents-config-"));
+  const configPath = join(root, "simple-subagents.json");
+  await mkdir(configPath);
+
+  const result = await loadConfig(configPath);
+
+  assert.equal(result.config.confirmWrites, true);
+  assert.match(result.warning ?? "", /read|config/i);
+});
+
 test("valid confirmWrites is preserved", async () => {
   const root = await mkdtemp(join(tmpdir(), "simple-subagents-config-"));
   const configPath = join(root, "simple-subagents.json");
@@ -62,6 +73,31 @@ test("discovers generic and user markdown profiles", async () => {
   assert.equal(result.agents[1]?.systemPrompt, "Return line-referenced findings.");
 });
 
+test("agents directory read failures return a diagnostic", async () => {
+  const root = await mkdtemp(join(tmpdir(), "simple-subagents-agents-"));
+  const agentsDir = join(root, "agents");
+  await writeFile(agentsDir, "not a directory");
+
+  const result = await discoverAgents(agentsDir);
+
+  assert.deepEqual(result.agents.map((agent) => agent.name), ["generic"]);
+  assert.equal(result.diagnostics.length > 0, true);
+  assert.match(result.diagnostics[0] ?? "", /agent|read|directory/i);
+});
+
+test("malformed frontmatter does not stop later profiles", async () => {
+  const root = await mkdtemp(join(tmpdir(), "simple-subagents-agents-"));
+  const agentsDir = join(root, "agents");
+  await mkdir(agentsDir);
+  await writeFile(join(agentsDir, "bad.md"), `---\nname: [\n---\nBroken\n`);
+  await writeFile(join(agentsDir, "good.md"), `---\nname: reviewer\ndescription: Keep going\n---\nReturn line-referenced findings.\n`);
+
+  const result = await discoverAgents(agentsDir);
+
+  assert.deepEqual(result.agents.map((agent) => agent.name), ["generic", "reviewer"]);
+  assert.equal(result.diagnostics.some((note) => /frontmatter|yaml|parse/i.test(note)), true);
+});
+
 test("keeps the first duplicate profile", async () => {
   const root = await mkdtemp(join(tmpdir(), "simple-subagents-agents-"));
   const agentsDir = join(root, "agents");
@@ -86,4 +122,10 @@ test("excludes project profiles", async () => {
 
   assert.deepEqual(result.agents.map((agent) => agent.name), ["generic", "user-reviewer"]);
   assert.equal(result.diagnostics.some((note) => /project/i.test(note)), true);
+});
+
+test("entrypoint exports a function", async () => {
+  const mod = await import("../src/index.ts");
+
+  assert.equal(typeof mod.default, "function");
 });
