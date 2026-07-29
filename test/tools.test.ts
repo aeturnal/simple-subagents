@@ -9,6 +9,7 @@ import {
   startJobs,
   statusJobs,
   type ToolServices,
+  type WriteConfirmation,
 } from "../src/tools.ts";
 import {
   createSimpleSubagentsExtension,
@@ -132,6 +133,19 @@ test("startJobs reports writable confirmation requiring interactive UI without e
 
   assert.equal(unavailable.content[0]?.text, "Writable confirmation requires interactive UI.");
   assert.deepEqual(unavailable.details.diagnostics, ["Writable confirmation requires interactive UI."]);
+  assert.deepEqual(services.manager.list(), []);
+  assert.equal(runner.started.length, 0);
+});
+
+test("startJobs fails closed for an invalid writable confirmation outcome", async () => {
+  const { services, runner } = createServices(undefined, {
+    confirmWritable: async () => false as unknown as WriteConfirmation,
+  });
+
+  const invalid = await startJobs({ tasks: [{ task: "write", writeAccess: true }] }, services, {} as never);
+
+  assert.equal(invalid.content[0]?.text, "Writable confirmation requires interactive UI.");
+  assert.deepEqual(invalid.details.diagnostics, ["Writable confirmation requires interactive UI."]);
   assert.deepEqual(services.manager.list(), []);
   assert.equal(runner.started.length, 0);
 });

@@ -76,13 +76,11 @@ export async function startJobs(input: StartInput, services: ToolServices, ctx: 
   }
   const writable = requests.filter((request) => request.writeAccess);
   if (writable.length > 0) {
-    const outcome = await services.confirmWritable(writable, ctx);
-    if (outcome === "declined") {
-      const diagnostic = "Writable jobs were declined.";
-      return response(diagnostic, [], [diagnostic], "start");
-    }
-    if (outcome === "unavailable") {
-      const diagnostic = "Writable confirmation requires interactive UI.";
+    const confirmation = await services.confirmWritable(writable, ctx);
+    if (confirmation !== "approved") {
+      const diagnostic = confirmation === "declined"
+        ? "Writable jobs were declined."
+        : "Writable confirmation requires interactive UI.";
       return response(diagnostic, [], [diagnostic], "start");
     }
   }
