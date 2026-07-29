@@ -35,9 +35,11 @@ const captureNotice = (label: string, truncation?: { originalBytes: number; kept
 const usageLine = (job: Job): string =>
   `- Usage: input ${job.usage.input}, output ${job.usage.output}, cache read ${job.usage.cacheRead}, cache write ${job.usage.cacheWrite}, cost ${job.usage.cost}, turns ${job.usage.turns}`;
 
-const truncateFormattedResult = (content: string, originalBytes: number): string => {
-  let notice = truncationNotice(originalBytes, 0);
+export const capCollectedPayload = (content: string): string => {
+  const originalBytes = Buffer.byteLength(content, "utf8");
+  if (originalBytes <= COLLECTED_OUTPUT_MAX_BYTES) return content;
 
+  let notice = truncationNotice(originalBytes, 0);
   while (true) {
     const availableBytes = COLLECTED_OUTPUT_MAX_BYTES - Buffer.byteLength(`\n\n${notice}`, "utf8");
     const text = truncateUtf8(content, Math.max(0, availableBytes)).text;
@@ -87,8 +89,5 @@ export const formatCollectedResult = (job: Job): string => {
   }
 
   const formattedContent = sections.join("\n\n");
-  const contentBytes = Buffer.byteLength(formattedContent, "utf8");
-
-  if (contentBytes <= COLLECTED_OUTPUT_MAX_BYTES) return formattedContent;
-  return truncateFormattedResult(formattedContent, contentBytes);
+  return capCollectedPayload(formattedContent);
 };

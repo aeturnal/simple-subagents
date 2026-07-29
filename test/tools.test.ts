@@ -18,6 +18,7 @@ import {
 } from "../src/index.js";
 import { JobManager } from "../src/job-manager.js";
 import type { ProcessResult, ProcessRunOptions, ProcessRunner, RunningProcess } from "../src/process-runner.js";
+import { COLLECTED_OUTPUT_MAX_BYTES } from "../src/output.ts";
 import type { AgentProfile, Job, UsageStats } from "../src/types.js";
 
 const usage = (): UsageStats => ({ input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: 0.5, turns: 1 });
@@ -244,6 +245,30 @@ test("control collection preserves durable capture notices", async () => {
   const collected = text(result);
   assert.ok(Buffer.byteLength(collected, "utf8") <= 50 * 1024);
   assert.match(collected, /Output capture truncated: retained 51200 of 70000 bytes/);
+});
+
+test("control collection caps eight maximum-size results before collecting all snapshots", async () => {
+  const { services, runner } = createServices();
+  await startJobs(
+    { tasks: Array.from({ length: 8 }, (_, index) => ({ task: `collect result ${index + 1}` })) },
+    services,
+    {} as never,
+  );
+  for (const started of runner.started.slice(0, 4)) started.resolve(completed("😀".repeat(12_800)));
+  await runner.flush();
+  for (const started of runner.started.slice(4)) started.resolve(completed("😀".repeat(12_800)));
+  await runner.flush();
+
+  const result = await controlJobs({ action: "collect", ids: Array.from({ length: 8 }, (_, index) => `job-${index + 1}`) }, services);
+  const collected = text(result);
+  const collectedBytes = Buffer.byteLength(collected, "utf8");
+
+  assert.ok(collectedBytes <= COLLECTED_OUTPUT_MAX_BYTES, `collected ${collectedBytes} bytes, exceeding the ${COLLECTED_OUTPUT_MAX_BYTES}-byte cap`);
+  assert.equal(Buffer.from(collected, "utf8").toString("utf8"), collected);
+  assert.doesNotMatch(collected, /\uFFFD/);
+  assert.match(collected, /\n\nOutput truncated: retained \d+ of \d+ bytes\.$/);
+  assert.deepEqual(result.details.jobs.map((job) => [job.id, job.state]), Array.from({ length: 8 }, (_, index) => [`job-${index + 1}`, "collected"]));
+  assert.deepEqual(services.manager.list().map((job) => [job.id, job.state]), Array.from({ length: 8 }, (_, index) => [`job-${index + 1}`, "collected"]));
 });
 
 test("controlJobs reports invalid transitions while continuing other IDs", async () => {

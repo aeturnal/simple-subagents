@@ -80,6 +80,22 @@ test("parses a final unterminated record when finished", () => {
   assert.deepEqual(parser.finish(), [{ complete: true }]);
 });
 
+test("drops an oversized unterminated malformed record before finish and recovers", () => {
+  const parser = new JsonLineParser();
+  const chunk = Buffer.from("😀".repeat(3_201));
+
+  for (let index = 0; index < 4; index += 1) assert.deepEqual(parser.push(chunk), []);
+
+  assert.equal(parser.malformedCount, 1);
+  assert.equal((parser as unknown as { pending: string }).pending, "");
+  assert.equal(parser.malformedSamples.length, 1);
+  assert.ok(Buffer.byteLength(parser.malformedSamples[0] ?? "", "utf8") <= MALFORMED_EVENT_SAMPLE_MAX_BYTES);
+  assert.doesNotMatch(parser.malformedSamples[0] ?? "", /\uFFFD/);
+  assert.deepEqual(parser.push(Buffer.from('{"recovered":true}\n')), [{ recovered: true }]);
+  assert.deepEqual(parser.finish(), []);
+  assert.equal(parser.malformedCount, 1);
+});
+
 test("truncates without splitting UTF-8 characters", () => {
   const result = truncateUtf8("a😀b", 5);
 

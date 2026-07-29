@@ -1,5 +1,5 @@
 import { StringDecoder } from "node:string_decoder";
-import { MALFORMED_EVENT_SAMPLE_MAX_BYTES, truncateUtf8 } from "./output.ts";
+import { CAPTURED_TEXT_MAX_BYTES, MALFORMED_EVENT_SAMPLE_MAX_BYTES, truncateUtf8 } from "./output.ts";
 
 export class JsonLineParser {
   private readonly decoder = new StringDecoder("utf8");
@@ -25,9 +25,15 @@ export class JsonLineParser {
 
   private consume(text: string, finished: boolean): unknown[] {
     const records = text.split("\n");
-    this.pending = finished ? "" : records.pop() ?? "";
+    const pending = finished ? "" : records.pop() ?? "";
+    this.pending = pending;
+    const oversizedPending = !finished && Buffer.byteLength(pending, "utf8") > CAPTURED_TEXT_MAX_BYTES;
+    if (oversizedPending) this.pending = "";
 
-    return records.flatMap((record) => this.parse(record));
+    return [
+      ...records.flatMap((record) => this.parse(record)),
+      ...(oversizedPending ? this.malformed(pending) : []),
+    ];
   }
 
   private parse(record: string): unknown[] {
@@ -37,11 +43,15 @@ export class JsonLineParser {
     try {
       return [JSON.parse(line) as unknown];
     } catch {
-      this._malformedCount += 1;
-      if (this._malformedSamples.length < 3) {
-        this._malformedSamples.push(truncateUtf8(line, MALFORMED_EVENT_SAMPLE_MAX_BYTES).text);
-      }
-      return [];
+      return this.malformed(line);
     }
+  }
+
+  private malformed(line: string): unknown[] {
+    this._malformedCount += 1;
+    if (this._malformedSamples.length < 3) {
+      this._malformedSamples.push(truncateUtf8(line, MALFORMED_EVENT_SAMPLE_MAX_BYTES).text);
+    }
+    return [];
   }
 }

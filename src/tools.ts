@@ -3,7 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { JobManager } from "./job-manager.js";
-import { formatCollectedResult } from "./output.js";
+import { capCollectedPayload, formatCollectedResult } from "./output.js";
 import type { AgentProfile, Job, JobRequest } from "./types.js";
 
 const StartTask = Type.Object({
@@ -103,7 +103,7 @@ export async function statusJobs(input: StatusInput, services: ToolServices): Pr
 export async function controlJobs(input: ControlInput, services: ToolServices): Promise<ToolResponse> {
   const jobs: Job[] = [];
   const diagnostics: string[] = [];
-  const collected: string[] = [];
+  const collected: Job[] = [];
 
   for (const id of input.ids) {
     const job = services.manager.get(id);
@@ -126,13 +126,14 @@ export async function controlJobs(input: ControlInput, services: ToolServices): 
 
     if (input.action === "cancel") jobs.push(await services.manager.cancel(id));
     else if (input.action === "discard") jobs.push(services.manager.discard(id));
-    else {
-      collected.push(formatCollectedResult(job));
-      jobs.push(services.manager.collect(id));
-    }
+    else collected.push(job);
   }
 
-  if (input.action === "collect" && collected.length > 0) return response(collected.join("\n\n---\n\n"), jobs, diagnostics, "collect");
+  if (input.action === "collect" && collected.length > 0) {
+    const content = capCollectedPayload(collected.map(formatCollectedResult).join("\n\n---\n\n"));
+    jobs.push(...collected.map((job) => services.manager.collect(job.id)));
+    return response(content, jobs, diagnostics, "collect");
+  }
   const action = input.action === "discard" ? "Discarded" : "Cancelled";
   const compact = jobs.length > 0 ? `${action}: ${summary(jobs)}.` : "No jobs changed.";
   return response(diagnostics.length > 0 ? `${compact} ${diagnostics.join(" ")}` : compact, jobs, diagnostics, input.action);
