@@ -34,7 +34,7 @@ const profile = (overrides: Partial<AgentProfile> = {}): AgentProfile => ({
   ...overrides,
 });
 
-const spawnedRunner = (child = new FakeChildProcess()) => {
+const spawnedRunner = (child = new FakeChildProcess(), fileExists?: (path: string) => boolean) => {
   let command = "";
   let args: string[] = [];
   let spawnOptions: unknown;
@@ -45,6 +45,7 @@ const spawnedRunner = (child = new FakeChildProcess()) => {
       spawnOptions = nextOptions;
       return child;
     },
+    ...(fileExists ? { fileExists } : {}),
   });
 
   return {
@@ -105,7 +106,7 @@ test("falls back to the pi command for a Bun virtual current script", async () =
   process.argv[1] = "/$bunfs/root/pi-script.mjs";
 
   try {
-    const { child, runner, invocation } = spawnedRunner();
+    const { child, runner, invocation } = spawnedRunner(new FakeChildProcess(), (path) => path === process.argv[1]);
     const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} });
 
     assert.equal(invocation().command, "pi");

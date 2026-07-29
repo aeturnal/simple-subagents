@@ -63,6 +63,7 @@ export interface PiProcessRunnerDependencies {
   spawnProcess?(command: string, args: readonly string[], options: SpawnOptions): SpawnedProcess;
   setTimer?(callback: () => void, delay: number): unknown;
   clearTimer?(timer: unknown): void;
+  fileExists?(path: string): boolean;
 }
 
 const emptyUsage = (): UsageStats => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 });
@@ -101,9 +102,9 @@ const getTools = (profile: AgentProfile, writeAccess: boolean): string[] => {
   return (profile.tools ?? []).filter((tool) => permitted.has(tool));
 };
 
-const getPiInvocation = (args: string[]): { command: string; args: string[] } => {
+const getPiInvocation = (args: string[], fileExists: (path: string) => boolean = existsSync): { command: string; args: string[] } => {
   const currentScript = process.argv[1];
-  if (currentScript && !currentScript.startsWith("/$bunfs/root/") && existsSync(currentScript)) {
+  if (currentScript && !currentScript.startsWith("/$bunfs/root/") && fileExists(currentScript)) {
     return { command: process.execPath, args: [currentScript, ...args] };
   }
 
@@ -126,11 +127,13 @@ export class PiProcessRunner implements ProcessRunner {
   private readonly spawnProcess: (command: string, args: readonly string[], options: SpawnOptions) => SpawnedProcess;
   private readonly setTimer: (callback: () => void, delay: number) => unknown;
   private readonly clearTimer: (timer: unknown) => void;
+  private readonly fileExists: (path: string) => boolean;
 
   constructor(dependencies: PiProcessRunnerDependencies = {}) {
     this.spawnProcess = dependencies.spawnProcess ?? defaultSpawnProcess;
     this.setTimer = dependencies.setTimer ?? ((callback, delay) => setTimeout(callback, delay));
     this.clearTimer = dependencies.clearTimer ?? ((timer) => clearTimeout(timer as NodeJS.Timeout));
+    this.fileExists = dependencies.fileExists ?? existsSync;
   }
 
   run(options: ProcessRunOptions): RunningProcess {
@@ -240,7 +243,7 @@ export class PiProcessRunner implements ProcessRunner {
       prompt = writePrompt(options.profile);
       if (prompt) args.push("--append-system-prompt", prompt.path);
       args.push(options.request.task);
-      const invocation = getPiInvocation(args);
+      const invocation = getPiInvocation(args, this.fileExists);
       child = this.spawnProcess(invocation.command, invocation.args, {
         cwd: options.cwd,
         shell: false,
