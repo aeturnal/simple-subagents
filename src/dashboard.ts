@@ -191,11 +191,15 @@ export class SubagentsDashboard implements Component {
     wrap("Started: ", job.startedAt ? new Date(job.startedAt).toISOString() : "not started");
     wrap("Finished: ", job.finishedAt ? new Date(job.finishedAt).toISOString() : "not finished");
     wrap("Progress: ", job.progress.slice(-3).map((item) => item.text).join(" · ") || "none");
+    const latestPartial = [...job.progress].reverse().find((item) => item.type === "text");
     wrap("Output: ", job.output || "none");
-    wrap("Output capture: ", job.outputTruncation ? `${job.outputTruncation.keptBytes} of ${job.outputTruncation.originalBytes} bytes retained` : "not truncated");
+    const outputTruncation = job.outputTruncation ?? job.truncation;
+    wrap("Output capture: ", outputTruncation ? `${outputTruncation.keptBytes} of ${outputTruncation.originalBytes} bytes retained` : "not truncated");
     wrap("Stderr: ", job.stderr || "none");
     wrap("Stderr capture: ", job.stderrTruncation ? `${job.stderrTruncation.keptBytes} of ${job.stderrTruncation.originalBytes} bytes retained` : "not truncated");
     wrap("Error: ", job.errorMessage || "none");
+    wrap("Error capture: ", job.errorTruncation ? `${job.errorTruncation.keptBytes} of ${job.errorTruncation.originalBytes} bytes retained` : "not truncated");
+    wrap("Partial output capture: ", latestPartial?.truncation ? `${latestPartial.truncation.keptBytes} of ${latestPartial.truncation.originalBytes} bytes retained` : "not truncated");
     wrap("Malformed: ", `${job.malformedEventCount} (${job.malformedEventSamples?.join(", ") || "none"})`);
     wrap("Usage: ", `input ${job.usage.input}, output ${job.usage.output}, cache ${job.usage.cacheRead + job.usage.cacheWrite}, ${job.usage.turns} turns`);
     wrap("Truncated: ", job.truncation ? `${job.truncation.keptBytes} of ${job.truncation.originalBytes} bytes retained` : "not truncated");

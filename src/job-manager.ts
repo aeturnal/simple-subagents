@@ -275,8 +275,12 @@ export class JobManager {
     if (entry.job.state !== "running" && entry.job.state !== "cancelled") return;
 
     if (item.type === "text") {
+      const captured = truncateUtf8(item.text, CAPTURED_TEXT_MAX_BYTES);
+      const originalBytes = item.truncation?.originalBytes ?? Buffer.byteLength(item.text, "utf8");
+      const keptBytes = Buffer.byteLength(captured.text, "utf8");
+      const truncation = originalBytes > keptBytes ? { originalBytes, keptBytes } : undefined;
       entry.job.progress = entry.job.progress.filter((progress) => progress.type !== "text");
-      if (item.text) entry.job.progress.push(structuredClone(item));
+      if (captured.text) entry.job.progress.push(structuredClone({ ...item, text: captured.text, truncation }));
     } else {
       entry.job.progress.push(structuredClone(item));
       const nonTextOverflow = entry.job.progress.filter((progress) => progress.type !== "text").length - MAX_PROGRESS_ITEMS;
@@ -294,7 +298,11 @@ export class JobManager {
     const stderr = truncateUtf8(result.stderr, CAPTURED_TEXT_MAX_BYTES);
     entry.job.output = output.text;
     entry.job.stderr = stderr.text;
-    entry.job.errorMessage = result.errorMessage ? truncateUtf8(result.errorMessage, CAPTURED_TEXT_MAX_BYTES).text : undefined;
+    const error = result.errorMessage ? truncateUtf8(result.errorMessage, CAPTURED_TEXT_MAX_BYTES) : undefined;
+    const errorOriginalBytes = result.errorTruncation?.originalBytes ?? Buffer.byteLength(result.errorMessage ?? "", "utf8");
+    const errorKeptBytes = Buffer.byteLength(error?.text ?? "", "utf8");
+    entry.job.errorMessage = error?.text;
+    entry.job.errorTruncation = errorOriginalBytes > errorKeptBytes ? { originalBytes: errorOriginalBytes, keptBytes: errorKeptBytes } : undefined;
     entry.job.usage = structuredClone(result.usage);
     entry.job.model = result.model;
     entry.job.stopReason = result.stopReason;

@@ -58,21 +58,30 @@ export const formatCollectedResult = (job: Job): string => {
     ...(job.model ? [`- Model: ${job.model}`] : []),
     usageLine(job),
   ];
-  const sections = [`# Subagent result: ${job.id}`, metadata.join("\n")];
+  const latestPartial = [...job.progress].reverse().find((item) => item.type === "text");
+  const captureNotices = [
+    captureNotice("Output", job.outputTruncation ?? job.truncation),
+    captureNotice("Stderr", job.stderrTruncation),
+    captureNotice("Error", job.errorTruncation),
+    captureNotice("Partial output", latestPartial?.truncation),
+  ].filter((notice): notice is string => notice !== undefined);
+  const isFailure = job.state === "failed" || job.state === "cancelled";
+  const sections = [
+    `# Subagent result: ${job.id}`,
+    ...(captureNotices.length ? [`## Capture limits\n${captureNotices.join("\n")}`] : []),
+    ...(isFailure ? [`Partial output:\n${latestPartial?.text ?? "none"}`] : []),
+    metadata.join("\n"),
+  ];
 
-  if (job.state === "failed" || job.state === "cancelled") {
-    const outputNotice = captureNotice("Output", job.outputTruncation ?? job.truncation);
-    const stderrNotice = captureNotice("Stderr", job.stderrTruncation);
+  if (isFailure) {
     const samples = job.malformedEventSamples?.length ? job.malformedEventSamples.map((sample) => `- ${sample}`).join("\n") : "none";
     sections.push([
       "## Diagnostics",
       `Output:\n${job.output}`,
-      outputNotice,
       `Stderr:\n${job.stderr}`,
-      stderrNotice,
       `Error:\n${job.errorMessage ?? "none"}`,
       `Malformed events: ${job.malformedEventCount}\nMalformed samples:\n${samples}`,
-    ].filter((section): section is string => section !== undefined).join("\n\n"));
+    ].join("\n\n"));
   } else {
     sections.push(`## Result\n\n${job.output}`);
   }

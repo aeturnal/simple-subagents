@@ -134,6 +134,41 @@ test("formats model, usage, and independent actionable diagnostics", () => {
   ]) assert.match(formatted, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
+test("keeps capture notices before oversized completed task and result bodies", () => {
+  const formatted = formatCollectedResult(job({
+    request: { task: "task ".repeat(20_000), agent: "reviewer", writeAccess: false },
+    output: "output ".repeat(20_000),
+    outputTruncation: { originalBytes: 70_000, keptBytes: 50 * 1024 },
+  }));
+
+  assert.ok(Buffer.byteLength(formatted, "utf8") <= COLLECTED_OUTPUT_MAX_BYTES);
+  assert.match(formatted, /Output capture truncated: retained 51200 of 70000 bytes/);
+  assert.ok(formatted.indexOf("## Capture limits") < formatted.indexOf("- Task:"));
+});
+
+test("keeps capture notices and latest partial output in failed payloads", () => {
+  const formatted = formatCollectedResult(job({
+    state: "failed",
+    request: { task: "task ".repeat(20_000), agent: "reviewer", writeAccess: false },
+    output: "output ".repeat(20_000),
+    stderr: "stderr ".repeat(20_000),
+    errorMessage: "error ".repeat(20_000),
+    progress: [{ type: "text", text: "latest partial", timestamp: 1, truncation: { originalBytes: 90_000, keptBytes: 50 * 1024 } }],
+    outputTruncation: { originalBytes: 70_000, keptBytes: 50 * 1024 },
+    stderrTruncation: { originalBytes: 75_000, keptBytes: 50 * 1024 },
+    errorTruncation: { originalBytes: 80_000, keptBytes: 50 * 1024 },
+  }));
+
+  assert.ok(Buffer.byteLength(formatted, "utf8") <= COLLECTED_OUTPUT_MAX_BYTES);
+  for (const expected of [
+    "Output capture truncated: retained 51200 of 70000 bytes",
+    "Stderr capture truncated: retained 51200 of 75000 bytes",
+    "Error capture truncated: retained 51200 of 80000 bytes",
+    "Partial output capture truncated: retained 51200 of 90000 bytes",
+    "Partial output:\nlatest partial",
+  ]) assert.match(formatted, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
 test("formats failed results with output, stderr, and truncation diagnostics", () => {
   assert.equal(
     formatCollectedResult(
@@ -144,7 +179,7 @@ test("formats failed results with output, stderr, and truncation diagnostics", (
         truncation: { originalBytes: 60000, keptBytes: 51200 },
       }),
     ),
-    "# Subagent result: job-42\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n- Usage: input 0, output 0, cache read 0, cache write 0, cost 0, turns 0\n\n## Diagnostics\n\nOutput:\nPartial answer\n\nOutput capture truncated: retained 51200 of 60000 bytes.\n\nStderr:\nprocess exited 1\n\nError:\nnone\n\nMalformed events: 0\nMalformed samples:\nnone",
+    "# Subagent result: job-42\n\n## Capture limits\nOutput capture truncated: retained 51200 of 60000 bytes.\n\nPartial output:\nnone\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n- Usage: input 0, output 0, cache read 0, cache write 0, cost 0, turns 0\n\n## Diagnostics\n\nOutput:\nPartial answer\n\nStderr:\nprocess exited 1\n\nError:\nnone\n\nMalformed events: 0\nMalformed samples:\nnone",
   );
 });
 
@@ -167,7 +202,7 @@ test("caps failed diagnostics without duplicating output and reports formatted-p
     }),
   );
   const notice = /\n\nOutput truncated: retained (\d+) of (\d+) bytes\.$/.exec(formatted);
-  const completeContent = `# Subagent result: job-42\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n- Usage: input 0, output 0, cache read 0, cache write 0, cost 0, turns 0\n\n## Diagnostics\n\nOutput:\n${output}\n\nOutput capture truncated: retained 60000 of 100000 bytes.\n\nStderr:\n${stderr}\n\nError:\nnone\n\nMalformed events: 0\nMalformed samples:\nnone`;
+  const completeContent = `# Subagent result: job-42\n\n## Capture limits\nOutput capture truncated: retained 60000 of 100000 bytes.\n\nPartial output:\nnone\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n- Usage: input 0, output 0, cache read 0, cache write 0, cost 0, turns 0\n\n## Diagnostics\n\nOutput:\n${output}\n\nStderr:\n${stderr}\n\nError:\nnone\n\nMalformed events: 0\nMalformed samples:\nnone`;
 
   assert.ok(Buffer.byteLength(formatted) <= COLLECTED_OUTPUT_MAX_BYTES);
   assert.equal(formatted.split("Output:\n").length - 1, 1);
@@ -188,7 +223,7 @@ test("reports final cap counts in the formatted-payload domain after upstream ou
     }),
   );
   const notice = /\n\nOutput truncated: retained (\d+) of (\d+) bytes\.$/.exec(formatted);
-  const completeContent = `# Subagent result: job-42\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n- Usage: input 0, output 0, cache read 0, cache write 0, cost 0, turns 0\n\n## Diagnostics\n\nOutput:\npartial\n\nOutput capture truncated: retained 500 of 1000 bytes.\n\nStderr:\n${stderr}\n\nError:\nnone\n\nMalformed events: 0\nMalformed samples:\nnone`;
+  const completeContent = `# Subagent result: job-42\n\n## Capture limits\nOutput capture truncated: retained 500 of 1000 bytes.\n\nPartial output:\nnone\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n- Usage: input 0, output 0, cache read 0, cache write 0, cost 0, turns 0\n\n## Diagnostics\n\nOutput:\npartial\n\nStderr:\n${stderr}\n\nError:\nnone\n\nMalformed events: 0\nMalformed samples:\nnone`;
 
   assert.ok(notice);
   assert.equal(Number(notice[2]), Buffer.byteLength(completeContent));

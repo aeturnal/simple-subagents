@@ -191,6 +191,21 @@ test("controlJobs formats the terminal snapshot before collecting it", async () 
   assert.equal(services.manager.get("job-1")?.state, "collected");
 });
 
+test("control collection preserves durable capture notices", async () => {
+  const { services, runner } = createServices();
+  await startJobs({ tasks: [{ task: "collect capture diagnostics" }] }, services, {} as never);
+  runner.started[0]?.resolve({
+    ...completed("😀".repeat(12_800)),
+    outputTruncation: { originalBytes: 70_000, keptBytes: 50 * 1024 },
+  });
+  await runner.flush();
+
+  const result = await controlJobs({ action: "collect", ids: ["job-1"] }, services);
+  const collected = text(result);
+  assert.ok(Buffer.byteLength(collected, "utf8") <= 50 * 1024);
+  assert.match(collected, /Output capture truncated: retained 51200 of 70000 bytes/);
+});
+
 test("controlJobs reports invalid transitions while continuing other IDs", async () => {
   const { services, runner } = createServices();
   await startJobs({ tasks: [{ task: "running" }, { task: "settled" }] }, services, {} as never);

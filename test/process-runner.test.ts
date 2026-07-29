@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import test from "node:test";
 import { PiProcessRunner } from "../src/process-runner.ts";
+import { CAPTURED_TEXT_MAX_BYTES } from "../src/output.ts";
 import type { AgentProfile, JobRequest, ProgressItem } from "../src/types.ts";
 
 class FakeChildProcess extends EventEmitter {
@@ -274,6 +275,32 @@ test("reduces split Pi text_delta updates into bounded latest text progress", as
   await running.result;
 });
 
+test("records cumulative partial metadata across multibyte deltas and resets it for the next assistant message", async () => {
+  const { child, runner } = spawnedRunner();
+  const progress: ProgressItem[] = [];
+  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress: (item) => progress.push(item) });
+  const firstDelta = "😀".repeat(12_800);
+  const secondDelta = "😀".repeat(100);
+
+  for (const delta of [firstDelta, secondDelta]) {
+    child.stdout.emit("data", Buffer.from(`${JSON.stringify({ type: "message_update", message: { role: "assistant" }, assistantMessageEvent: { type: "text_delta", delta } })}\n`));
+  }
+
+  const latest = progress.at(-1);
+  assert.ok(latest);
+  assert.ok(Buffer.byteLength(latest.text, "utf8") <= CAPTURED_TEXT_MAX_BYTES);
+  assert.deepEqual(latest.truncation, {
+    originalBytes: Buffer.byteLength(firstDelta + secondDelta, "utf8"),
+    keptBytes: Buffer.byteLength(latest.text, "utf8"),
+  });
+
+  child.stdout.emit("data", Buffer.from('{"type":"message_start","message":{"role":"assistant"}}\n'));
+  child.stdout.emit("data", Buffer.from('{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","delta":"new"}}\n'));
+  assert.deepEqual(progress.at(-1), { type: "text", text: "new", timestamp: progress.at(-1)?.timestamp, truncation: undefined });
+  child.close();
+  await running.result;
+});
+
 test("resets partial text when a new assistant message starts", async () => {
   const { child, runner } = spawnedRunner();
   const progress: ProgressItem[] = [];
@@ -317,6 +344,50 @@ test("resolves a spawn error as a failed result", async () => {
   const result = await running.result;
   assert.equal(result.exitCode, 1);
   assert.equal(result.errorMessage, "pi missing");
+});
+
+test("records assistant error metadata when capture truncates", async () => {
+  const { child, runner } = spawnedRunner();
+  const errorText = "😀".repeat(13_000);
+  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} });
+
+  child.stdout.emit("data", Buffer.from(`${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], errorMessage: errorText } })}\n`));
+  child.close(1);
+
+  const result = await running.result;
+  assert.ok(Buffer.byteLength(result.errorMessage ?? "", "utf8") <= CAPTURED_TEXT_MAX_BYTES);
+  assert.deepEqual(result.errorTruncation, {
+    originalBytes: Buffer.byteLength(errorText, "utf8"),
+    keptBytes: Buffer.byteLength(result.errorMessage ?? "", "utf8"),
+  });
+});
+
+test("clears error metadata when a later assistant error fits capture", async () => {
+  const { child, runner } = spawnedRunner();
+  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} });
+
+  for (const errorMessage of ["😀".repeat(13_000), "later error"]) {
+    child.stdout.emit("data", Buffer.from(`${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], errorMessage } })}\n`));
+  }
+  child.close(1);
+
+  const result = await running.result;
+  assert.equal(result.errorMessage, "later error");
+  assert.equal(result.errorTruncation, undefined);
+});
+
+test("records spawn error metadata when capture truncates", async () => {
+  const child = new FakeChildProcess();
+  const runner = new PiProcessRunner({ spawnProcess: () => child });
+  const errorText = "😀".repeat(13_000);
+  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} });
+
+  child.emit("error", new Error(errorText));
+  const result = await running.result;
+  assert.deepEqual(result.errorTruncation, {
+    originalBytes: Buffer.byteLength(errorText, "utf8"),
+    keptBytes: Buffer.byteLength(result.errorMessage ?? "", "utf8"),
+  });
 });
 
 test("fails a child closed by an external signal even after assistant output", async () => {

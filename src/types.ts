@@ -40,6 +40,7 @@ export interface ProgressItem {
   type: "text" | "tool" | "diagnostic";
   text: string;
   timestamp: number;
+  truncation?: TextTruncation;
 }
 
 export interface Job {
@@ -57,6 +58,7 @@ export interface Job {
   model?: string;
   stopReason?: string;
   errorMessage?: string;
+  errorTruncation?: TextTruncation;
   malformedEventCount: number;
   malformedEventSamples?: string[];
   outputTruncation?: TextTruncation;

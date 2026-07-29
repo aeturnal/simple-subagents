@@ -391,6 +391,34 @@ test("retains only the latest text progress alongside bounded non-text history",
   assert.deepEqual(progress.filter((item) => item.type === "text").map((item) => item.text), ["partial two"]);
 });
 
+test("preserves upstream partial and error metadata through defensive capture normalization", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  const [job] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.ok(job);
+  const oversized = "😀".repeat(13_000);
+
+  runner.progress(0, {
+    type: "text",
+    text: oversized,
+    timestamp: 1,
+    truncation: { originalBytes: 90_000, keptBytes: 50 * 1024 },
+  });
+  runner.complete(0, failedResult({
+    errorMessage: oversized,
+    errorTruncation: { originalBytes: 80_000, keptBytes: 50 * 1024 },
+  }));
+  await runner.flush();
+
+  const stored = manager.get(job.id);
+  const latest = stored?.progress.find((item) => item.type === "text");
+  assert.ok(latest);
+  assert.ok(Buffer.byteLength(latest.text, "utf8") <= 50 * 1024);
+  assert.deepEqual(latest.truncation, { originalBytes: 90_000, keptBytes: 50 * 1024 });
+  assert.ok(Buffer.byteLength(stored?.errorMessage ?? "", "utf8") <= 50 * 1024);
+  assert.deepEqual(stored?.errorTruncation, { originalBytes: 80_000, keptBytes: 50 * 1024 });
+});
+
 test("notifies subscribers of changes and stops after unsubscription", async () => {
   const runner = new ControlledRunner();
   const manager = new JobManager({ runner });

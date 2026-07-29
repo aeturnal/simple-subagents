@@ -250,11 +250,13 @@ test("dashboard detail shows independent actionable diagnostics and capture noti
     malformedEventSamples: ["bad event"],
     outputTruncation: { originalBytes: 60_000, keptBytes: 50 * 1024 },
     stderrTruncation: { originalBytes: 70_000, keptBytes: 50 * 1024 },
+    errorTruncation: { originalBytes: 80_000, keptBytes: 50 * 1024 },
+    progress: [{ type: "text", text: "latest partial", timestamp: 2_500, truncation: { originalBytes: 90_000, keptBytes: 50 * 1024 } }],
   })]));
 
   view.handleInput?.("\r");
   const detail = render(view, 160);
-  for (const expected of ["Error: assistant error", "Malformed: 2 (bad event)", "Output capture: 51200 of 60000 bytes retained", "Stderr capture: 51200 of 70000 bytes retained"]) {
+  for (const expected of ["Error: assistant error", "Malformed: 2 (bad event)", "Output capture: 51200 of 60000 bytes retained", "Stderr capture: 51200 of 70000 bytes retained", "Error capture: 51200 of 80000 bytes retained", "Partial output capture: 51200 of 90000 bytes retained"]) {
     assert.match(detail, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 });
@@ -266,7 +268,7 @@ test("dashboard details always render every required label with absent-value pla
 
   view.handleInput?.("\r");
   const detail = render(view, 160);
-  for (const label of ["Task:", "Profile:", "Access:", "Created:", "Started:", "Finished:", "Progress:", "Output:", "Stderr:", "Usage:", "Truncated:"]) {
+  for (const label of ["Task:", "Profile:", "Access:", "Created:", "Started:", "Finished:", "Progress:", "Output:", "Output capture:", "Stderr:", "Stderr capture:", "Error:", "Error capture:", "Partial output capture:", "Usage:", "Truncated:"]) {
     assert.ok(detail.includes(label), `missing ${label}`);
   }
   assert.match(detail, /Started: not started/);

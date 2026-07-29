@@ -28,6 +28,7 @@ export interface ProcessResult {
   model?: string;
   stopReason?: string;
   errorMessage?: string;
+  errorTruncation?: TextTruncation;
   malformedEventCount: number;
   malformedEventSamples?: string[];
   outputTruncation?: TextTruncation;
@@ -156,6 +157,7 @@ export class PiProcessRunner implements ProcessRunner {
     let child: SpawnedProcess | undefined;
     let output = "";
     let partialOutput = "";
+    let partialOriginalBytes = 0;
     let outputTruncation: TextTruncation | undefined;
     let stderr = "";
     let stderrOriginalBytes = 0;
@@ -164,6 +166,7 @@ export class PiProcessRunner implements ProcessRunner {
     let resultModel = model;
     let stopReason: string | undefined;
     let errorMessage: string | undefined;
+    let errorTruncation: TextTruncation | undefined;
     let settled = false;
     let cancelled = false;
     let escalationTimer: unknown;
@@ -174,7 +177,20 @@ export class PiProcessRunner implements ProcessRunner {
     });
 
     const emitProgress = (text: string) => options.onProgress({ type: "tool", text, timestamp: Date.now() });
-    const emitPartial = () => options.onProgress({ type: "text", text: partialOutput, timestamp: Date.now() });
+    const emitPartial = () => {
+      const keptBytes = Buffer.byteLength(partialOutput, "utf8");
+      options.onProgress({
+        type: "text",
+        text: partialOutput,
+        timestamp: Date.now(),
+        truncation: partialOriginalBytes > keptBytes ? { originalBytes: partialOriginalBytes, keptBytes } : undefined,
+      });
+    };
+    const setError = (text: string): void => {
+      const captured = truncateUtf8(text, CAPTURED_TEXT_MAX_BYTES);
+      errorMessage = captured.text;
+      errorTruncation = captured.truncation;
+    };
     const appendStderr = (text: string, sourceBytes: number): void => {
       stderrOriginalBytes += sourceBytes;
       const safeChunk = truncateUtf8(text, CAPTURED_TEXT_MAX_BYTES).text;
@@ -190,9 +206,11 @@ export class PiProcessRunner implements ProcessRunner {
 
       if (record.type === "message_start") {
         const message = asRecord(record.message);
-        if (message?.role === "assistant" && partialOutput) {
+        if (message?.role === "assistant") {
+          const hadPartialOutput = partialOutput.length > 0;
           partialOutput = "";
-          emitPartial();
+          partialOriginalBytes = 0;
+          if (hadPartialOutput) emitPartial();
         }
         return;
       }
@@ -203,7 +221,8 @@ export class PiProcessRunner implements ProcessRunner {
         if (message?.role === "assistant" && assistantEvent?.type === "text_delta") {
           const delta = asString(assistantEvent.delta);
           if (delta !== undefined) {
-            partialOutput = truncateUtf8(partialOutput + truncateUtf8(delta, CAPTURED_TEXT_MAX_BYTES).text, CAPTURED_TEXT_MAX_BYTES).text;
+            partialOriginalBytes += Buffer.byteLength(delta, "utf8");
+            partialOutput = truncateUtf8(partialOutput + delta, CAPTURED_TEXT_MAX_BYTES).text;
             emitPartial();
           }
         }
@@ -223,6 +242,7 @@ export class PiProcessRunner implements ProcessRunner {
         }
         if (partialOutput) {
           partialOutput = "";
+          partialOriginalBytes = 0;
           emitPartial();
         }
         const eventUsage = asRecord(message.usage);
@@ -237,7 +257,7 @@ export class PiProcessRunner implements ProcessRunner {
         resultModel = asString(message.model) ?? resultModel;
         stopReason = asString(message.stopReason) ?? stopReason;
         const nextErrorMessage = asString(message.errorMessage);
-        if (nextErrorMessage !== undefined) errorMessage = truncateUtf8(nextErrorMessage, CAPTURED_TEXT_MAX_BYTES).text;
+        if (nextErrorMessage !== undefined) setError(nextErrorMessage);
         return;
       }
 
@@ -274,7 +294,7 @@ export class PiProcessRunner implements ProcessRunner {
       settled = true;
       for (const event of parser.finish()) reduceEvent(event);
       appendStderr(stderrDecoder.end(), 0);
-      if (spawnError) errorMessage = truncateUtf8(spawnError.message, CAPTURED_TEXT_MAX_BYTES).text;
+      if (spawnError) setError(spawnError.message);
       cleanup();
       resolveResult({
         exitCode,
@@ -284,6 +304,7 @@ export class PiProcessRunner implements ProcessRunner {
         model: resultModel,
         stopReason,
         errorMessage,
+        errorTruncation,
         malformedEventCount: parser.malformedCount,
         malformedEventSamples: [...parser.malformedSamples],
         outputTruncation,
