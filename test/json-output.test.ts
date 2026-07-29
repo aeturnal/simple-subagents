@@ -113,23 +113,47 @@ test("caps completed results at the complete model-visible byte limit", () => {
   assert.ok(!formatted.includes("\uFFFD"));
 });
 
-test("caps failed diagnostics without duplicating output and merges truncation counts", () => {
+test("caps failed diagnostics without duplicating output and reports formatted-payload counts", () => {
+  const output = "😀".repeat(15_000);
+  const stderr = "😀".repeat(15_000);
   const formatted = formatCollectedResult(
     job({
       state: "failed",
-      output: "😀".repeat(15_000),
-      stderr: "😀".repeat(15_000),
+      output,
+      stderr,
       truncation: { originalBytes: 100_000, keptBytes: 60_000 },
     }),
   );
   const notice = /\n\nOutput truncated: retained (\d+) of (\d+) bytes\.$/.exec(formatted);
+  const completeContent = `# Subagent result: job-42\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n\n## Diagnostics\n\nOutput:\n${output}\n\nStderr:\n${stderr}\n\nOutput truncated: retained 60000 of 100000 bytes.`;
 
   assert.ok(Buffer.byteLength(formatted) <= COLLECTED_OUTPUT_MAX_BYTES);
   assert.equal(formatted.split("Output:\n").length - 1, 1);
   assert.ok(!formatted.includes("\uFFFD"));
   assert.ok(notice);
-  assert.equal(notice[2], "100000");
+  assert.equal(Number(notice[2]), Buffer.byteLength(completeContent));
   assert.equal(notice[1], String(Buffer.byteLength(formatted.slice(0, notice.index))));
+});
+
+test("reports final cap counts in the formatted-payload domain after upstream output truncation", () => {
+  const stderr = "x".repeat(COLLECTED_OUTPUT_MAX_BYTES + 1);
+  const formatted = formatCollectedResult(
+    job({
+      state: "failed",
+      output: "partial",
+      stderr,
+      truncation: { originalBytes: 1_000, keptBytes: 500 },
+    }),
+  );
+  const notice = /\n\nOutput truncated: retained (\d+) of (\d+) bytes\.$/.exec(formatted);
+  const completeContent = `# Subagent result: job-42\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n\n## Diagnostics\n\nOutput:\npartial\n\nStderr:\n${stderr}\n\nOutput truncated: retained 500 of 1000 bytes.`;
+
+  assert.ok(notice);
+  assert.equal(Number(notice[2]), Buffer.byteLength(completeContent));
+  assert.equal(Number(notice[1]), Buffer.byteLength(formatted.slice(0, notice.index)));
+  assert.ok(Number(notice[1]) <= Number(notice[2]));
+  assert.ok(Buffer.byteLength(formatted) <= COLLECTED_OUTPUT_MAX_BYTES);
+  assert.ok(!formatted.includes("\uFFFD"));
 });
 
 test("caps cancelled results with large multibyte stderr", () => {

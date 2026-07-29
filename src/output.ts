@@ -53,18 +53,11 @@ export const formatCollectedResult = (job: Job): string => {
     sections.push(`## Result\n\n${job.output}`);
   }
 
-  const content = sections.join("\n\n");
-  const contentBytes = Buffer.byteLength(content, "utf8");
+  const formattedContent = job.truncation
+    ? `${sections.join("\n\n")}\n\n${truncationNotice(job.truncation.originalBytes, job.truncation.keptBytes)}`
+    : sections.join("\n\n");
+  const contentBytes = Buffer.byteLength(formattedContent, "utf8");
 
-  if (job.truncation) {
-    const notice = truncationNotice(job.truncation.originalBytes, job.truncation.keptBytes);
-    if (contentBytes + Buffer.byteLength(`\n\n${notice}`, "utf8") <= COLLECTED_OUTPUT_MAX_BYTES) {
-      return `${content}\n\n${notice}`;
-    }
-
-    return truncateFormattedResult(content, job.truncation.originalBytes);
-  }
-
-  if (contentBytes <= COLLECTED_OUTPUT_MAX_BYTES) return content;
-  return truncateFormattedResult(content, contentBytes);
+  if (contentBytes <= COLLECTED_OUTPUT_MAX_BYTES) return formattedContent;
+  return truncateFormattedResult(formattedContent, contentBytes);
 };
