@@ -2,6 +2,8 @@
 
 Lightweight background Pi subagents. Start independent work in parallel, inspect it while it runs, and collect only the results you need.
 
+Requires Node.js 22.19 or newer and Pi 0.82.x.
+
 ## Use locally
 
 ```sh
