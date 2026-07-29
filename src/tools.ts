@@ -36,6 +36,7 @@ export interface ToolServices {
 export interface ToolDetails {
   jobs: Job[];
   diagnostics: string[];
+  operation?: "start" | "status" | "cancel" | "collect" | "discard";
 }
 
 export interface ToolResponse {
@@ -43,9 +44,14 @@ export interface ToolResponse {
   details: ToolDetails;
 }
 
-const response = (content: string, jobs: readonly Job[] = [], diagnostics: string[] = []): ToolResponse => ({
+const response = (
+  content: string,
+  jobs: readonly Job[] = [],
+  diagnostics: string[] = [],
+  operation?: ToolDetails["operation"],
+): ToolResponse => ({
   content: [{ type: "text", text: content }],
-  details: { jobs: [...jobs], diagnostics },
+  details: { jobs: [...jobs], diagnostics, operation },
 });
 
 const toRequest = (task: StartInput["tasks"][number]): JobRequest => ({
@@ -58,31 +64,33 @@ const toRequest = (task: StartInput["tasks"][number]): JobRequest => ({
 const summary = (jobs: readonly Job[]): string => jobs.map((job) => `${job.id} (${job.state})`).join(", ");
 
 export async function startJobs(input: StartInput, services: ToolServices, ctx: ExtensionContext): Promise<ToolResponse> {
-  if (input.tasks.length > 8) return response("A start batch accepts at most 8 jobs.", [], ["A start batch accepts at most 8 jobs."]);
+  if (input.tasks.length > 8) return response("A start batch accepts at most 8 jobs.", [], ["A start batch accepts at most 8 jobs."], "start");
 
   const requests = input.tasks.map(toRequest);
-  if (requests.some((request) => request.writeAccess) && !(await services.confirmWritable(requests.filter((request) => request.writeAccess), ctx))) {
-    return response("Writable jobs were not approved.");
+  const profiles = await services.getProfiles();
+  const unknown = requests.find((request) => !profiles.has(request.agent));
+  if (unknown) {
+    const diagnostic = `Unknown agent profile: ${unknown.agent}`;
+    return response(diagnostic, [], [diagnostic], "start");
+  }
+  const writable = requests.filter((request) => request.writeAccess);
+  if (writable.length > 0 && !(await services.confirmWritable(writable, ctx))) {
+    return response("Writable jobs were not approved.", [], [], "start");
   }
 
-  try {
-    const jobs = services.manager.enqueue(requests, await services.getProfiles(), services.defaults(ctx));
-    return response(`Started ${jobs.length} job${jobs.length === 1 ? "" : "s"}: ${summary(jobs)}.`, jobs);
-  } catch (error) {
-    const diagnostic = error instanceof Error ? error.message : String(error);
-    return response(diagnostic, [], [diagnostic]);
-  }
+  const jobs = services.manager.enqueue(requests, profiles, services.defaults(ctx));
+  return response(`Started ${jobs.length} job${jobs.length === 1 ? "" : "s"}: ${summary(jobs)}.`, jobs, [], "start");
 }
 
 export async function statusJobs(input: StatusInput, services: ToolServices): Promise<ToolResponse> {
   if (input.id) {
     const job = services.manager.get(input.id);
-    if (!job) return response(`Unknown job: ${input.id}`, [], [`Unknown job: ${input.id}`]);
-    return response(`${job.id}: ${job.state}`, [job]);
+    if (!job) return response(`Unknown job: ${input.id}`, [], [`Unknown job: ${input.id}`], "status");
+    return response(`${job.id}: ${job.state}`, [job], [], "status");
   }
 
   const jobs = services.manager.list();
-  return response(jobs.length === 0 ? "No background subagent jobs." : `Jobs: ${summary(jobs)}`, jobs);
+  return response(jobs.length === 0 ? "No background subagent jobs." : `Jobs: ${summary(jobs)}`, jobs, [], "status");
 }
 
 export async function controlJobs(input: ControlInput, services: ToolServices): Promise<ToolResponse> {
@@ -91,25 +99,32 @@ export async function controlJobs(input: ControlInput, services: ToolServices): 
   const collected: string[] = [];
 
   for (const id of input.ids) {
-    try {
-      if (input.action === "cancel") jobs.push(await services.manager.cancel(id));
-      else if (input.action === "discard") jobs.push(services.manager.discard(id));
-      else {
-        const beforeCollection = services.manager.get(id);
-        if (!beforeCollection) throw new Error(`Unknown job: ${id}`);
-        const formatted = formatCollectedResult(beforeCollection);
-        jobs.push(services.manager.collect(id));
-        collected.push(formatted);
-      }
-    } catch (error) {
-      diagnostics.push(error instanceof Error ? error.message : String(error));
+    const job = services.manager.get(id);
+    if (!job) {
+      diagnostics.push(`Unknown job: ${id}`);
+      continue;
+    }
+    if (input.action === "collect" && !["completed", "failed", "cancelled", "collected"].includes(job.state)) {
+      diagnostics.push(`Cannot collect job in ${job.state} state`);
+      continue;
+    }
+    if (input.action === "discard" && !["completed", "failed", "cancelled", "discarded"].includes(job.state)) {
+      diagnostics.push(`Cannot discard job in ${job.state} state`);
+      continue;
+    }
+
+    if (input.action === "cancel") jobs.push(await services.manager.cancel(id));
+    else if (input.action === "discard") jobs.push(services.manager.discard(id));
+    else {
+      collected.push(formatCollectedResult(job));
+      jobs.push(services.manager.collect(id));
     }
   }
 
-  if (input.action === "collect" && collected.length > 0) return response(collected.join("\n\n---\n\n"), jobs, diagnostics);
+  if (input.action === "collect" && collected.length > 0) return response(collected.join("\n\n---\n\n"), jobs, diagnostics, "collect");
   const action = input.action === "discard" ? "Discarded" : "Cancelled";
   const compact = jobs.length > 0 ? `${action}: ${summary(jobs)}.` : "No jobs changed.";
-  return response(diagnostics.length > 0 ? `${compact} ${diagnostics.join(" ")}` : compact, jobs, diagnostics);
+  return response(diagnostics.length > 0 ? `${compact} ${diagnostics.join(" ")}` : compact, jobs, diagnostics, input.action);
 }
 
 const description = [
@@ -119,13 +134,26 @@ const description = [
   "Concurrent writable jobs should receive non-overlapping work.",
 ].join(" ");
 
-const renderJobs = (jobs: readonly Job[], expanded: boolean, theme: { fg(color: string, text: string): string }): string => {
-  if (jobs.length === 0) return theme.fg("muted", "No jobs.");
-  return jobs.map((job) => {
-    const icon = job.state === "completed" ? "✓" : job.state === "failed" || job.state === "cancelled" ? "✗" : "…";
-    const line = `${icon} ${job.id} ${job.state}`;
-    return expanded ? `${line}\n  ${job.request.task}` : line;
-  }).join("\n");
+const renderToolResult = (result: ToolResponse, expanded: boolean, theme: { fg(color: string, text: string): string }): string => {
+  const { jobs, diagnostics, operation } = result.details;
+  const content = result.content.find((part) => part.type === "text")?.text ?? "";
+  const icon = (state: Job["state"]): string => {
+    if (state === "completed") return "✓";
+    if (state === "failed" || state === "cancelled") return "✗";
+    if (state === "collected") return "↳";
+    if (state === "discarded") return "⌫";
+    return state === "queued" ? "○" : "…";
+  };
+  const heading = jobs.length === 0 ? "" : operation === "start" ? `Started ${jobs.length} job${jobs.length === 1 ? "" : "s"}`
+    : operation === "collect" ? `Collected ${jobs.length} result${jobs.length === 1 ? "" : "s"}`
+      : operation === "discard" ? `Discarded ${jobs.length} job${jobs.length === 1 ? "" : "s"}`
+        : operation === "cancel" ? `Cancelled ${jobs.length} job${jobs.length === 1 ? "" : "s"}`
+          : `Jobs: ${jobs.length}`;
+  const compact = [heading, ...jobs.map((job) => `${icon(job.state)} ${job.id} ${job.state}`), ...diagnostics].filter(Boolean).join("\n") || content;
+  if (!expanded) return theme.fg("muted", compact);
+
+  const detail = operation === "collect" || diagnostics.length > 0 ? content : "";
+  return theme.fg("muted", [compact, detail].filter(Boolean).join("\n\n"));
 };
 
 export function registerSubagentTools(pi: ExtensionAPI, services: ToolServices): void {
@@ -136,7 +164,7 @@ export function registerSubagentTools(pi: ExtensionAPI, services: ToolServices):
     parameters: StartParams,
     execute: async (_id, input, _signal, _update, ctx) => startJobs(input, services, ctx),
     renderCall: (input, theme) => new Text(theme.fg("toolTitle", `subagent_start ${input.tasks.length} job${input.tasks.length === 1 ? "" : "s"}`), 0, 0),
-    renderResult: (result, { expanded }, theme) => new Text(renderJobs((result.details as ToolDetails).jobs, expanded, theme), 0, 0),
+    renderResult: (result, { expanded }, theme) => new Text(renderToolResult(result as ToolResponse, expanded, theme), 0, 0),
   });
   pi.registerTool({
     name: "subagent_status",
@@ -145,7 +173,7 @@ export function registerSubagentTools(pi: ExtensionAPI, services: ToolServices):
     parameters: StatusParams,
     execute: async (_id, input) => statusJobs(input, services),
     renderCall: (input, theme) => new Text(theme.fg("toolTitle", input.id ? `subagent_status ${input.id}` : "subagent_status"), 0, 0),
-    renderResult: (result, { expanded }, theme) => new Text(renderJobs((result.details as ToolDetails).jobs, expanded, theme), 0, 0),
+    renderResult: (result, { expanded }, theme) => new Text(renderToolResult(result as ToolResponse, expanded, theme), 0, 0),
   });
   pi.registerTool({
     name: "subagent_control",
@@ -154,6 +182,6 @@ export function registerSubagentTools(pi: ExtensionAPI, services: ToolServices):
     parameters: ControlParams,
     execute: async (_id, input) => controlJobs(input, services),
     renderCall: (input, theme) => new Text(theme.fg("toolTitle", `subagent_control ${input.action} ${input.ids.join(", ")}`), 0, 0),
-    renderResult: (result, { expanded }, theme) => new Text(renderJobs((result.details as ToolDetails).jobs, expanded, theme), 0, 0),
+    renderResult: (result, { expanded }, theme) => new Text(renderToolResult(result as ToolResponse, expanded, theme), 0, 0),
   });
 }

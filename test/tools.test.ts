@@ -110,6 +110,16 @@ test("startJobs asks once only for a writable batch and respects rejection", asy
   assert.equal(runner.started.length, 1);
 });
 
+test("startJobs returns an ordinary diagnostic for an unknown profile", async () => {
+  const { services } = createServices();
+
+  const result = await startJobs({ tasks: [{ task: "inspect", agent: "missing" }] }, services, {} as never);
+
+  assert.match(text(result), /Unknown agent profile: missing/);
+  assert.deepEqual(result.details.jobs, []);
+  assert.deepEqual(result.details.diagnostics, ["Unknown agent profile: missing"]);
+});
+
 test("statusJobs lists all jobs and can inspect one job", async () => {
   const { services, runner } = createServices();
   await startJobs({ tasks: [{ task: "one" }, { task: "two" }] }, services, {} as never);
@@ -175,16 +185,83 @@ test("controlJobs reports invalid transitions while continuing other IDs", async
   assert.match(result.details.diagnostics[1] ?? "", /Unknown job/i);
 });
 
-test("controlJobs discards completed jobs without placing output into model content", async () => {
+test("controlJobs discards multiple completed jobs without placing output into model content", async () => {
   const { services, runner } = createServices();
-  await startJobs({ tasks: [{ task: "discard" }] }, services, {} as never);
-  runner.started[0]?.resolve(completed("do not surface this"));
+  await startJobs({ tasks: [{ task: "discard one" }, { task: "discard two" }] }, services, {} as never);
+  runner.started[0]?.resolve(completed("do not surface one"));
+  runner.started[1]?.resolve(completed("do not surface two"));
   await runner.flush();
 
-  const result = await controlJobs({ action: "discard", ids: ["job-1"] }, services);
+  const result = await controlJobs({ action: "discard", ids: ["job-1", "job-2"] }, services);
 
-  assert.equal(result.details.jobs[0]?.state, "discarded");
-  assert.doesNotMatch(text(result), /do not surface this/);
+  assert.deepEqual(result.details.jobs.map((job) => [job.id, job.state]), [["job-1", "discarded"], ["job-2", "discarded"]]);
+  assert.doesNotMatch(text(result), /do not surface/);
+});
+
+test("tool renderers summarize jobs and expose collected output or diagnostics when expanded", async () => {
+  const pi = new FakePi();
+  const { services, runner } = createServices();
+  registerSubagentTools(pi as never, services);
+  const theme = { fg: (_color: string, value: string) => value };
+  const render = (toolName: string, result: unknown, expanded: boolean): string =>
+    pi.tools.get(toolName)?.renderResult(result, { expanded }, theme).render(160).join("\n") ?? "";
+
+  const started = await startJobs({ tasks: [{ task: "one" }, { task: "two" }] }, services, {} as never);
+  const compactStart = render("subagent_start", started, false);
+  assert.match(compactStart, /Started 2 jobs/);
+  assert.match(compactStart, /… job-1 running/);
+  assert.match(compactStart, /… job-2 running/);
+
+  runner.started[0]?.resolve(completed("collected secret"));
+  await runner.flush();
+  const collected = await controlJobs({ action: "collect", ids: ["job-1"] }, services);
+  const compactCollect = render("subagent_control", collected, false);
+  assert.match(compactCollect, /Collected 1 result/);
+  assert.match(compactCollect, /↳ job-1 collected/);
+  assert.doesNotMatch(compactCollect, /collected secret/);
+  assert.match(render("subagent_control", collected, true), /collected secret/);
+
+  const unknown = await statusJobs({ id: "missing" }, services);
+  const declined = await startJobs(
+    { tasks: [{ task: "write", writeAccess: true }] },
+    { ...services, confirmWritable: async () => false },
+    {} as never,
+  );
+  const invalid = await controlJobs({ action: "collect", ids: ["job-2"] }, services);
+  for (const rendered of [
+    render("subagent_status", unknown, false),
+    render("subagent_start", declined, false),
+    render("subagent_control", invalid, false),
+  ]) assert.doesNotMatch(rendered, /No jobs/);
+  assert.match(render("subagent_status", unknown, true), /Unknown job: missing/);
+  assert.match(render("subagent_start", declined, true), /not approved/i);
+  assert.match(render("subagent_control", invalid, true), /Cannot collect/i);
+});
+
+test("startJobs propagates profile and default resolution failures", async () => {
+  const profileFailure = createServices(undefined, { getProfiles: async () => { throw new Error("profiles unavailable"); } });
+  await assert.rejects(startJobs({ tasks: [{ task: "inspect" }] }, profileFailure.services, {} as never), /profiles unavailable/);
+
+  const defaultFailure = createServices(undefined, { defaults: () => { throw new Error("defaults unavailable"); } });
+  await assert.rejects(startJobs({ tasks: [{ task: "inspect" }] }, defaultFailure.services, {} as never), /defaults unavailable/);
+});
+
+test("startJobs propagates unexpected manager failures", async () => {
+  const { services } = createServices();
+  await services.manager.shutdown();
+
+  await assert.rejects(startJobs({ tasks: [{ task: "inspect" }] }, services, {} as never), /shut down/i);
+});
+
+test("controlJobs propagates formatter failures", async () => {
+  const job = { id: "job-1", state: "completed" } as Job;
+  Object.defineProperty(job, "request", { get: () => { throw new Error("formatting unavailable"); } });
+  const manager = {
+    get: () => job,
+    collect: () => job,
+  } as unknown as JobManager;
+
+  await assert.rejects(controlJobs({ action: "collect", ids: ["job-1"] }, { manager } as ToolServices), /formatting unavailable/);
 });
 
 test("registered tools expose strict schema boundaries and required guidance", () => {
@@ -214,44 +291,35 @@ test("registered tools expose strict schema boundaries and required guidance", (
   }
 });
 
-test("completion notices debounce newly ready IDs, deduplicate rerenders, and never leak output", () => {
+test("completion notices debounce real terminal transitions at 100 ms, including cancellation, without leaking output", async () => {
   const pi = new FakePi();
   const timers = new FakeTimers();
-  let listener: ((jobs: readonly Job[]) => void) | undefined;
-  const manager = {
-    subscribe(next: (jobs: readonly Job[]) => void) {
-      listener = next;
-      return () => { listener = undefined; };
-    },
-  } as unknown as JobManager;
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
   const cleanup = installCompletionNotifier(pi as never, manager, timers);
-  const ready = (id: string, state: Job["state"], output: string): Job => ({
-    id,
-    state,
-    request: { task: output, agent: "generic", writeAccess: false },
-    profile: { ...profile, name: "generic", source: "builtin" },
-    createdAt: 1,
-    progress: [],
-    output,
-    stderr: output,
-    usage: usage(),
-    malformedEventCount: 0,
-  });
+  manager.enqueue(
+    [{ task: "first secret", agent: "generic", writeAccess: false }, { task: "second secret", agent: "generic", writeAccess: false }, { task: "third secret", agent: "generic", writeAccess: false }],
+    new Map([["generic", { ...profile, name: "generic", source: "builtin" }]]),
+    { cwd: "/workspace" },
+  );
 
-  listener?.([ready("job-1", "running", "first secret")]);
-  listener?.([ready("job-1", "completed", "first secret"), ready("job-2", "failed", "second secret")]);
-  listener?.([ready("job-1", "completed", "first secret"), ready("job-2", "failed", "second secret")]);
-  assert.equal(timers.pending.length, 1);
+  runner.started[0]?.resolve(completed("first secret"));
+  runner.started[1]?.resolve({ ...completed("second secret"), exitCode: 1 });
+  await manager.cancel("job-3");
+  await runner.flush();
+  assert.deepEqual(timers.delays, [100]);
   timers.runAll();
 
   assert.equal(pi.messages.length, 1);
-  assert.deepEqual(pi.messages[0]?.details, { jobIds: ["job-1", "job-2"] });
+  assert.deepEqual(pi.messages[0]?.details, { jobIds: ["job-1", "job-2", "job-3"] });
   assert.match(pi.messages[0]?.content ?? "", /job-1.*completed/i);
   assert.match(pi.messages[0]?.content ?? "", /job-2.*failed/i);
+  assert.match(pi.messages[0]?.content ?? "", /job-3.*cancelled/i);
   assert.doesNotMatch(pi.messages[0]?.content ?? "", /secret/);
   assert.deepEqual(pi.messageOptions[0], { deliverAs: "followUp", triggerTurn: true });
 
-  listener?.([ready("job-1", "completed", "first secret"), ready("job-2", "failed", "second secret")]);
+  runner.started[2]?.resolve(completed("third secret"));
+  await runner.flush();
   assert.equal(timers.pending.length, 0);
   cleanup();
 });
@@ -294,8 +362,17 @@ test("runtime loads config and profiles, surfaces diagnostics, confirms writable
   const result = await start.execute("call", { tasks: [{ task: "write", agent: "writer", writeAccess: true }, { task: "also write", agent: "writer", writeAccess: true }] }, undefined, undefined, fakeContext({ hasUI: true }, pi));
   assert.equal(pi.confirmations.length, 1);
   assert.match(text(result), /Started 2 jobs/);
+  assert.deepEqual(runner.started.map(({ options }) => ({
+    cwd: options.cwd,
+    profile: options.profile.name,
+    parentModel: options.parentModel,
+    thinkingLevel: options.thinkingLevel,
+  })), [
+    { cwd: "/workspace", profile: "writer", parentModel: "parent/model", thinkingLevel: "high" },
+    { cwd: "/workspace", profile: "writer", parentModel: "parent/model", thinkingLevel: "high" },
+  ]);
 
-  const shuttingDown = pi.emit("session_shutdown", {}, fakeContext({ hasUI: true }, pi));
+  const shuttingDown = pi.emit("session_shutdown", { reason: "reload" }, fakeContext({ hasUI: true }, pi));
   assert.equal(runner.started[0]?.cancelled, 1);
   for (const started of runner.started) started.resolve(completed());
   await shuttingDown;
@@ -347,7 +424,9 @@ test("runtime rejects writable starts without UI when confirmation is configured
 
 class FakeTimers {
   pending: Array<() => void> = [];
-  setTimer = (callback: () => void, _delay: number): number => {
+  delays: number[] = [];
+  setTimer = (callback: () => void, delay: number): number => {
+    this.delays.push(delay);
     this.pending.push(callback);
     return this.pending.length;
   };
