@@ -4,6 +4,12 @@ Lightweight background Pi subagents. Start independent work in parallel, inspect
 
 Requires Node.js 22.19 or newer and Pi 0.82.x.
 
+## Install
+
+```sh
+pi install npm:simple-subagents
+```
+
 ## Use locally
 
 Install the package persistently, then start Pi normally:

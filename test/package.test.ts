@@ -21,3 +21,19 @@ test("package Node floor matches the tested Pi packages", async () => {
     assert.equal(manifest.engines?.node, ">=22.19.0");
   }
 });
+
+test("package exposes public release metadata and license", async () => {
+  const root = JSON.parse(await readFile("package.json", "utf8"));
+  const license = await readFile("LICENSE", "utf8");
+
+  assert.deepEqual(root.repository, {
+    type: "git",
+    url: "git+https://github.com/aeturnal/simple-subagents.git",
+  });
+  assert.equal(root.homepage, "https://github.com/aeturnal/simple-subagents#readme");
+  assert.deepEqual(root.bugs, { url: "https://github.com/aeturnal/simple-subagents/issues" });
+  assert.deepEqual(root.publishConfig, { access: "public" });
+  assert.equal(root.license, "MIT");
+  assert.match(license, /Copyright \(c\) 2026 AETURNAL, LLC/);
+  assert.match(license, /Permission is hereby granted, free of charge/);
+});

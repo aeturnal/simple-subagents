@@ -7,6 +7,15 @@
   "exports": "./src/index.ts",
   "keywords": ["pi-package", "pi", "subagents"],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aeturnal/simple-subagents.git"
+  },
+  "homepage": "https://github.com/aeturnal/simple-subagents#readme",
+  "bugs": {
+    "url": "https://github.com/aeturnal/simple-subagents/issues"
+  },
+  "publishConfig": { "access": "public" },
   "files": ["src", "README.md"],
   "pi": { "extensions": ["./src/index.ts"] },
   "scripts": {
