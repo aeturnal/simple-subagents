@@ -538,6 +538,34 @@ test("completion notifier treats a missing candidate as stale without suppressin
   cleanup();
 });
 
+test("completion notifier contains delivery failure, preserves the inbox result, and does not retry", async () => {
+  const pi = new FakePi();
+  pi.sendError = new Error("delivery unavailable");
+  const timers = new FakeTimers();
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  const cleanup = installCompletionNotifier(pi as never, manager, timers);
+  manager.enqueue(
+    [{ task: "preserve", agent: "generic", writeAccess: false }],
+    new Map([["generic", { ...profile, name: "generic", source: "builtin" }]]),
+    { cwd: "/workspace" },
+  );
+
+  runner.started[0]?.resolve(completed("still in inbox"));
+  await runner.flush();
+  assert.doesNotThrow(() => timers.runAll());
+
+  assert.equal(pi.sendAttempts, 1);
+  assert.equal(pi.messages.length, 0);
+  assert.equal(manager.get("job-1")?.state, "completed");
+
+  pi.sendError = undefined;
+  manager.collect("job-1");
+  assert.equal(pi.sendAttempts, 1);
+  assert.equal(manager.get("job-1")?.state, "collected");
+  cleanup();
+});
+
 test("queued completion copy remains safe when collection happens before processing", async () => {
   const pi = new FakePi();
   const timers = new FakeTimers();
@@ -759,6 +787,8 @@ class FakePi {
   readonly handlers = new Map<string, Array<(event: unknown, ctx: any) => unknown>>();
   readonly messages: Array<{ customType: string; content: string; display: boolean; details: unknown }> = [];
   readonly messageOptions: unknown[] = [];
+  sendError: Error | undefined;
+  sendAttempts = 0;
   readonly notifications: Array<[string, string]> = [];
   readonly confirmations: Array<[string, string]> = [];
   readonly messageRenderers = new Map<string, unknown>();
@@ -775,6 +805,8 @@ class FakePi {
     for (const handler of this.handlers.get(event) ?? []) await handler(payload, ctx);
   }
   sendMessage(message: { customType: string; content: string; display: boolean; details: unknown }, options: unknown): void {
+    this.sendAttempts += 1;
+    if (this.sendError) throw this.sendError;
     this.messages.push(message);
     this.messageOptions.push(options);
   }

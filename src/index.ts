@@ -46,12 +46,16 @@ export function installCompletionNotifier(pi: ExtensionAPI, manager: JobManager,
     if (ready.length === 0) return;
     const jobIds = ready.map(([id]) => id);
     const summary = `Jobs may be ready: ${ready.map(([id, state]) => `${id} (${state})`).join(", ")}.`;
-    pi.sendMessage({
-      customType: "simple-subagents-ready",
-      content: `${summary}\nCheck their current state. Collect any still-uncollected results needed by the active task; otherwise no action is required.`,
-      display: true,
-      details: { jobIds },
-    }, { deliverAs: "followUp", triggerTurn: true });
+    try {
+      pi.sendMessage({
+        customType: "simple-subagents-ready",
+        content: `${summary}\nCheck their current state. Collect any still-uncollected results needed by the active task; otherwise no action is required.`,
+        display: true,
+        details: { jobIds },
+      }, { deliverAs: "followUp", triggerTurn: true });
+    } catch {
+      // Delivery is best-effort; jobs remain available through status and the dashboard.
+    }
   };
 
   const unsubscribe = manager.subscribe((jobs) => {
