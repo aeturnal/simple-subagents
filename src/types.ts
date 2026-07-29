@@ -31,6 +31,11 @@ export interface UsageStats {
   turns: number;
 }
 
+export interface TextTruncation {
+  originalBytes: number;
+  keptBytes: number;
+}
+
 export interface ProgressItem {
   type: "text" | "tool" | "diagnostic";
   text: string;
@@ -51,8 +56,13 @@ export interface Job {
   usage: UsageStats;
   model?: string;
   stopReason?: string;
+  errorMessage?: string;
   malformedEventCount: number;
-  truncation?: { originalBytes: number; keptBytes: number };
+  malformedEventSamples?: string[];
+  outputTruncation?: TextTruncation;
+  stderrTruncation?: TextTruncation;
+  /** @deprecated Use outputTruncation for producer capture metadata. */
+  truncation?: TextTruncation;
 }
 
 export const isSettled = (state: JobState): boolean =>

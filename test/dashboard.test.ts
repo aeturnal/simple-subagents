@@ -233,6 +233,32 @@ test("dashboard keeps navigation in range, renders exact help and write marker, 
   assert.equal(pi.ui.doneCalls, 1);
 });
 
+test("dashboard detail shows the latest partial assistant text progress", () => {
+  const view = dashboard(new FakeManager([job("job-1", "running", {
+    progress: [{ type: "text", text: "latest partial assistant response", timestamp: 2_500 }],
+  })]));
+
+  view.handleInput?.("\r");
+  assert.match(render(view, 160), /Progress: latest partial assistant response/);
+  view.dispose();
+});
+
+test("dashboard detail shows independent actionable diagnostics and capture notices", () => {
+  const view = dashboard(new FakeManager([job("job-1", "failed", {
+    errorMessage: "assistant error",
+    malformedEventCount: 2,
+    malformedEventSamples: ["bad event"],
+    outputTruncation: { originalBytes: 60_000, keptBytes: 50 * 1024 },
+    stderrTruncation: { originalBytes: 70_000, keptBytes: 50 * 1024 },
+  })]));
+
+  view.handleInput?.("\r");
+  const detail = render(view, 160);
+  for (const expected of ["Error: assistant error", "Malformed: 2 (bad event)", "Output capture: 51200 of 60000 bytes retained", "Stderr capture: 51200 of 70000 bytes retained"]) {
+    assert.match(detail, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+});
+
 test("dashboard details always render every required label with absent-value placeholders", () => {
   const view = dashboard(new FakeManager([job("job-1", "queued", {
     progress: [], output: "", stderr: "", startedAt: undefined, finishedAt: undefined, truncation: undefined,
@@ -369,7 +395,7 @@ test("dashboard restricts cancel, collect, and discard to eligible selected stat
 test("dashboard collection formats completed, failed, and cancelled terminal snapshots before delivery", () => {
   for (const state of ["completed", "failed", "cancelled"] as const) {
     const pi = new FakePi();
-    const manager = new FakeManager([job("job-1", state, { output: "The collected answer", stderr: "The terminal error" })]);
+    const manager = new FakeManager([job("job-1", state, { output: "The collected answer", stderr: "The terminal error", model: "test-model" })]);
     const view = dashboard(manager, pi);
 
     view.handleInput?.("x");
@@ -381,6 +407,8 @@ test("dashboard collection formats completed, failed, and cancelled terminal sna
     assert.equal(pi.messages[0]?.message.display, true);
     assert.ok(pi.messages[0]?.message.content.includes(`Status: ${state}`));
     assert.match(pi.messages[0]?.message.content, /The collected answer/);
+    assert.match(pi.messages[0]?.message.content, /Model: test-model/);
+    assert.match(pi.messages[0]?.message.content, /Usage: input 1, output 2, cache read 3, cache write 4, cost 0.5, turns 1/);
     if (state !== "completed") assert.match(pi.messages[0]?.message.content, /The terminal error/);
     assert.deepEqual(pi.messages[0]?.options, { deliverAs: "nextTurn" });
   }

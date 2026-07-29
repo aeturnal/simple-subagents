@@ -1,4 +1,5 @@
 import { StringDecoder } from "node:string_decoder";
+import { MALFORMED_EVENT_SAMPLE_MAX_BYTES, truncateUtf8 } from "./output.ts";
 
 export class JsonLineParser {
   private readonly decoder = new StringDecoder("utf8");
@@ -37,7 +38,9 @@ export class JsonLineParser {
       return [JSON.parse(line) as unknown];
     } catch {
       this._malformedCount += 1;
-      if (this._malformedSamples.length < 3) this._malformedSamples.push(line.slice(0, 500));
+      if (this._malformedSamples.length < 3) {
+        this._malformedSamples.push(truncateUtf8(line, MALFORMED_EVENT_SAMPLE_MAX_BYTES).text);
+      }
       return [];
     }
   }

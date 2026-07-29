@@ -1,4 +1,5 @@
 import type { ProcessResult, ProcessRunner, RunningProcess } from "./process-runner.js";
+import { CAPTURED_TEXT_MAX_BYTES, MALFORMED_EVENT_SAMPLE_MAX_BYTES, truncateUtf8 } from "./output.js";
 import type { AgentProfile, Job, JobRequest, JobState, ProgressItem, UsageStats } from "./types.js";
 
 const MAX_CONCURRENCY = 4;
@@ -273,19 +274,36 @@ export class JobManager {
   private addProgress(entry: InternalJob, item: ProgressItem): void {
     if (entry.job.state !== "running" && entry.job.state !== "cancelled") return;
 
-    entry.job.progress.push(structuredClone(item));
-    if (entry.job.progress.length > MAX_PROGRESS_ITEMS) entry.job.progress.splice(0, entry.job.progress.length - MAX_PROGRESS_ITEMS);
+    if (item.type === "text") {
+      entry.job.progress = entry.job.progress.filter((progress) => progress.type !== "text");
+      if (item.text) entry.job.progress.push(structuredClone(item));
+    } else {
+      entry.job.progress.push(structuredClone(item));
+      const nonTextOverflow = entry.job.progress.filter((progress) => progress.type !== "text").length - MAX_PROGRESS_ITEMS;
+      if (nonTextOverflow > 0) {
+        let remaining = nonTextOverflow;
+        entry.job.progress = entry.job.progress.filter((progress) => progress.type === "text" || remaining-- <= 0);
+      }
+    }
     this.notify();
   }
 
   private applyResult(entry: InternalJob, result: ProcessResult, forceFailure = false): void {
     this.active.delete(entry.job.id);
-    entry.job.output = result.output;
-    entry.job.stderr = result.stderr || result.errorMessage || "";
+    const output = truncateUtf8(result.output, CAPTURED_TEXT_MAX_BYTES);
+    const stderr = truncateUtf8(result.stderr, CAPTURED_TEXT_MAX_BYTES);
+    entry.job.output = output.text;
+    entry.job.stderr = stderr.text;
+    entry.job.errorMessage = result.errorMessage ? truncateUtf8(result.errorMessage, CAPTURED_TEXT_MAX_BYTES).text : undefined;
     entry.job.usage = structuredClone(result.usage);
     entry.job.model = result.model;
     entry.job.stopReason = result.stopReason;
     entry.job.malformedEventCount = result.malformedEventCount;
+    entry.job.malformedEventSamples = result.malformedEventSamples
+      ?.slice(0, 3)
+      .map((sample) => truncateUtf8(sample, MALFORMED_EVENT_SAMPLE_MAX_BYTES).text);
+    entry.job.outputTruncation = result.outputTruncation ?? output.truncation;
+    entry.job.stderrTruncation = result.stderrTruncation ?? stderr.truncation;
 
     if (entry.job.state === "running") {
       this.finish(entry, forceFailure ? "failed" : entry.cancellationRequested ? "cancelled" : this.resultState(result));

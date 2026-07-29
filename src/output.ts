@@ -2,6 +2,8 @@ import { Buffer } from "node:buffer";
 import type { Job } from "./types.ts";
 
 export const COLLECTED_OUTPUT_MAX_BYTES = 50 * 1024;
+export const CAPTURED_TEXT_MAX_BYTES = 50 * 1024;
+export const MALFORMED_EVENT_SAMPLE_MAX_BYTES = 500;
 
 export interface TruncatedText {
   text: string;
@@ -27,6 +29,12 @@ export const truncateUtf8 = (text: string, maxBytes: number): TruncatedText => {
 const truncationNotice = (originalBytes: number, keptBytes: number): string =>
   `Output truncated: retained ${keptBytes} of ${originalBytes} bytes.`;
 
+const captureNotice = (label: string, truncation?: { originalBytes: number; keptBytes: number }): string | undefined =>
+  truncation && `${label} capture truncated: retained ${truncation.keptBytes} of ${truncation.originalBytes} bytes.`;
+
+const usageLine = (job: Job): string =>
+  `- Usage: input ${job.usage.input}, output ${job.usage.output}, cache read ${job.usage.cacheRead}, cache write ${job.usage.cacheWrite}, cost ${job.usage.cost}, turns ${job.usage.turns}`;
+
 const truncateFormattedResult = (content: string, originalBytes: number): string => {
   let notice = truncationNotice(originalBytes, 0);
 
@@ -42,20 +50,34 @@ const truncateFormattedResult = (content: string, originalBytes: number): string
 
 export const formatCollectedResult = (job: Job): string => {
   const access = job.request.writeAccess ? "write" : "read-only";
-  const sections = [
-    `# Subagent result: ${job.id}`,
-    `- Status: ${job.state}\n- Agent: ${job.profile.name}\n- Access: ${access}\n- Task: ${job.request.task}`,
+  const metadata = [
+    `- Status: ${job.state}`,
+    `- Agent: ${job.profile.name}`,
+    `- Access: ${access}`,
+    `- Task: ${job.request.task}`,
+    ...(job.model ? [`- Model: ${job.model}`] : []),
+    usageLine(job),
   ];
+  const sections = [`# Subagent result: ${job.id}`, metadata.join("\n")];
 
   if (job.state === "failed" || job.state === "cancelled") {
-    sections.push(`## Diagnostics\n\nOutput:\n${job.output}\n\nStderr:\n${job.stderr}`);
+    const outputNotice = captureNotice("Output", job.outputTruncation ?? job.truncation);
+    const stderrNotice = captureNotice("Stderr", job.stderrTruncation);
+    const samples = job.malformedEventSamples?.length ? job.malformedEventSamples.map((sample) => `- ${sample}`).join("\n") : "none";
+    sections.push([
+      "## Diagnostics",
+      `Output:\n${job.output}`,
+      outputNotice,
+      `Stderr:\n${job.stderr}`,
+      stderrNotice,
+      `Error:\n${job.errorMessage ?? "none"}`,
+      `Malformed events: ${job.malformedEventCount}\nMalformed samples:\n${samples}`,
+    ].filter((section): section is string => section !== undefined).join("\n\n"));
   } else {
     sections.push(`## Result\n\n${job.output}`);
   }
 
-  const formattedContent = job.truncation
-    ? `${sections.join("\n\n")}\n\n${truncationNotice(job.truncation.originalBytes, job.truncation.keptBytes)}`
-    : sections.join("\n\n");
+  const formattedContent = sections.join("\n\n");
   const contentBytes = Buffer.byteLength(formattedContent, "utf8");
 
   if (contentBytes <= COLLECTED_OUTPUT_MAX_BYTES) return formattedContent;

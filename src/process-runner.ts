@@ -2,8 +2,10 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { JsonLineParser } from "./json-stream.js";
-import type { AgentProfile, JobRequest, ProgressItem, UsageStats } from "./types.js";
+import { CAPTURED_TEXT_MAX_BYTES, truncateUtf8 } from "./output.js";
+import type { AgentProfile, JobRequest, ProgressItem, TextTruncation, UsageStats } from "./types.js";
 
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const WRITE_TOOLS = new Set(["read", "grep", "find", "ls", "bash", "edit", "write"]);
@@ -27,6 +29,9 @@ export interface ProcessResult {
   stopReason?: string;
   errorMessage?: string;
   malformedEventCount: number;
+  malformedEventSamples?: string[];
+  outputTruncation?: TextTruncation;
+  stderrTruncation?: TextTruncation;
 }
 
 export interface RunningProcess {
@@ -150,7 +155,12 @@ export class PiProcessRunner implements ProcessRunner {
     let prompt: { dir: string; path: string } | undefined;
     let child: SpawnedProcess | undefined;
     let output = "";
+    let partialOutput = "";
+    let outputTruncation: TextTruncation | undefined;
     let stderr = "";
+    let stderrOriginalBytes = 0;
+    let stderrTruncation: TextTruncation | undefined;
+    const stderrDecoder = new StringDecoder("utf8");
     let resultModel = model;
     let stopReason: string | undefined;
     let errorMessage: string | undefined;
@@ -164,10 +174,41 @@ export class PiProcessRunner implements ProcessRunner {
     });
 
     const emitProgress = (text: string) => options.onProgress({ type: "tool", text, timestamp: Date.now() });
+    const emitPartial = () => options.onProgress({ type: "text", text: partialOutput, timestamp: Date.now() });
+    const appendStderr = (text: string, sourceBytes: number): void => {
+      stderrOriginalBytes += sourceBytes;
+      const safeChunk = truncateUtf8(text, CAPTURED_TEXT_MAX_BYTES).text;
+      stderr = truncateUtf8(stderr + safeChunk, CAPTURED_TEXT_MAX_BYTES).text;
+      if (stderrOriginalBytes > CAPTURED_TEXT_MAX_BYTES) {
+        stderrTruncation = { originalBytes: stderrOriginalBytes, keptBytes: Buffer.byteLength(stderr, "utf8") };
+      }
+    };
 
     const reduceEvent = (event: unknown): void => {
       const record = asRecord(event);
       if (!record) return;
+
+      if (record.type === "message_start") {
+        const message = asRecord(record.message);
+        if (message?.role === "assistant" && partialOutput) {
+          partialOutput = "";
+          emitPartial();
+        }
+        return;
+      }
+
+      if (record.type === "message_update") {
+        const message = asRecord(record.message);
+        const assistantEvent = asRecord(record.assistantMessageEvent);
+        if (message?.role === "assistant" && assistantEvent?.type === "text_delta") {
+          const delta = asString(assistantEvent.delta);
+          if (delta !== undefined) {
+            partialOutput = truncateUtf8(partialOutput + truncateUtf8(delta, CAPTURED_TEXT_MAX_BYTES).text, CAPTURED_TEXT_MAX_BYTES).text;
+            emitPartial();
+          }
+        }
+        return;
+      }
 
       if (record.type === "message_end") {
         const message = asRecord(record.message);
@@ -175,7 +216,15 @@ export class PiProcessRunner implements ProcessRunner {
 
         usage.turns += 1;
         const text = getAssistantText(message);
-        if (text !== undefined) output = text;
+        if (text !== undefined) {
+          const captured = truncateUtf8(text, CAPTURED_TEXT_MAX_BYTES);
+          output = captured.text;
+          outputTruncation = captured.truncation;
+        }
+        if (partialOutput) {
+          partialOutput = "";
+          emitPartial();
+        }
         const eventUsage = asRecord(message.usage);
         if (eventUsage) {
           usage.input += asNumber(eventUsage.input);
@@ -187,7 +236,8 @@ export class PiProcessRunner implements ProcessRunner {
         }
         resultModel = asString(message.model) ?? resultModel;
         stopReason = asString(message.stopReason) ?? stopReason;
-        errorMessage = asString(message.errorMessage) ?? errorMessage;
+        const nextErrorMessage = asString(message.errorMessage);
+        if (nextErrorMessage !== undefined) errorMessage = truncateUtf8(nextErrorMessage, CAPTURED_TEXT_MAX_BYTES).text;
         return;
       }
 
@@ -201,7 +251,7 @@ export class PiProcessRunner implements ProcessRunner {
       for (const event of parser.push(data)) reduceEvent(event);
     };
     const onStderr = (data: Buffer) => {
-      stderr += data.toString();
+      appendStderr(stderrDecoder.write(data), data.byteLength);
     };
     const cleanup = () => {
       if (child) {
@@ -223,7 +273,8 @@ export class PiProcessRunner implements ProcessRunner {
       if (settled) return;
       settled = true;
       for (const event of parser.finish()) reduceEvent(event);
-      if (spawnError) errorMessage = spawnError.message;
+      appendStderr(stderrDecoder.end(), 0);
+      if (spawnError) errorMessage = truncateUtf8(spawnError.message, CAPTURED_TEXT_MAX_BYTES).text;
       cleanup();
       resolveResult({
         exitCode,
@@ -234,9 +285,12 @@ export class PiProcessRunner implements ProcessRunner {
         stopReason,
         errorMessage,
         malformedEventCount: parser.malformedCount,
+        malformedEventSamples: [...parser.malformedSamples],
+        outputTruncation,
+        stderrTruncation,
       });
     };
-    const onClose = (code: number | null) => settle(code ?? 0);
+    const onClose = (code: number | null) => settle(code ?? 1);
     const onError = (error: Error) => settle(1, error);
 
     try {

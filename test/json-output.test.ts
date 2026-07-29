@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { JsonLineParser } from "../src/json-stream.ts";
-import { COLLECTED_OUTPUT_MAX_BYTES, formatCollectedResult, truncateUtf8 } from "../src/output.ts";
+import {
+  CAPTURED_TEXT_MAX_BYTES,
+  COLLECTED_OUTPUT_MAX_BYTES,
+  MALFORMED_EVENT_SAMPLE_MAX_BYTES,
+  formatCollectedResult,
+  truncateUtf8,
+} from "../src/output.ts";
 import type { Job } from "../src/types.ts";
 
 const job = (overrides: Partial<Job> = {}): Job => ({
@@ -56,6 +62,17 @@ test("counts malformed records and retains three 500-character samples", () => {
   assert.deepEqual(parser.malformedSamples, ["bad", "x".repeat(500), "third"]);
 });
 
+test("bounds malformed samples at a UTF-8-safe byte limit", () => {
+  const parser = new JsonLineParser();
+
+  parser.push(Buffer.from(`${"😀".repeat(200)}\n`));
+
+  assert.equal(CAPTURED_TEXT_MAX_BYTES, 50 * 1024);
+  assert.equal(MALFORMED_EVENT_SAMPLE_MAX_BYTES, 500);
+  assert.ok(Buffer.byteLength(parser.malformedSamples[0] ?? "", "utf8") <= MALFORMED_EVENT_SAMPLE_MAX_BYTES);
+  assert.doesNotMatch(parser.malformedSamples[0] ?? "", /\uFFFD/);
+});
+
 test("parses a final unterminated record when finished", () => {
   const parser = new JsonLineParser();
 
@@ -88,8 +105,33 @@ test("does not add truncation metadata when text fits", () => {
 test("formats a completed result deterministically", () => {
   assert.equal(
     formatCollectedResult(job()),
-    "# Subagent result: job-42\n\n- Status: completed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n\n## Result\n\nFinal findings",
+    "# Subagent result: job-42\n\n- Status: completed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n- Usage: input 0, output 0, cache read 0, cache write 0, cost 0, turns 0\n\n## Result\n\nFinal findings",
   );
+});
+
+test("formats model, usage, and independent actionable diagnostics", () => {
+  const formatted = formatCollectedResult(job({
+    state: "failed",
+    model: "openai/gpt-5",
+    usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: 0.5, turns: 6 },
+    output: "Partial answer",
+    stderr: "stderr warning",
+    errorMessage: "assistant error",
+    malformedEventCount: 2,
+    malformedEventSamples: ["bad event"],
+    outputTruncation: { originalBytes: 60_000, keptBytes: 50 * 1024 },
+    stderrTruncation: { originalBytes: 70_000, keptBytes: 50 * 1024 },
+  }));
+
+  for (const expected of [
+    "- Model: openai/gpt-5",
+    "- Usage: input 1, output 2, cache read 3, cache write 4, cost 0.5, turns 6",
+    "Output capture truncated: retained 51200 of 60000 bytes.",
+    "Stderr capture truncated: retained 51200 of 70000 bytes.",
+    "Error:\nassistant error",
+    "Malformed events: 2",
+    "- bad event",
+  ]) assert.match(formatted, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
 test("formats failed results with output, stderr, and truncation diagnostics", () => {
@@ -102,7 +144,7 @@ test("formats failed results with output, stderr, and truncation diagnostics", (
         truncation: { originalBytes: 60000, keptBytes: 51200 },
       }),
     ),
-    "# Subagent result: job-42\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n\n## Diagnostics\n\nOutput:\nPartial answer\n\nStderr:\nprocess exited 1\n\nOutput truncated: retained 51200 of 60000 bytes.",
+    "# Subagent result: job-42\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n- Usage: input 0, output 0, cache read 0, cache write 0, cost 0, turns 0\n\n## Diagnostics\n\nOutput:\nPartial answer\n\nOutput capture truncated: retained 51200 of 60000 bytes.\n\nStderr:\nprocess exited 1\n\nError:\nnone\n\nMalformed events: 0\nMalformed samples:\nnone",
   );
 });
 
@@ -125,7 +167,7 @@ test("caps failed diagnostics without duplicating output and reports formatted-p
     }),
   );
   const notice = /\n\nOutput truncated: retained (\d+) of (\d+) bytes\.$/.exec(formatted);
-  const completeContent = `# Subagent result: job-42\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n\n## Diagnostics\n\nOutput:\n${output}\n\nStderr:\n${stderr}\n\nOutput truncated: retained 60000 of 100000 bytes.`;
+  const completeContent = `# Subagent result: job-42\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n- Usage: input 0, output 0, cache read 0, cache write 0, cost 0, turns 0\n\n## Diagnostics\n\nOutput:\n${output}\n\nOutput capture truncated: retained 60000 of 100000 bytes.\n\nStderr:\n${stderr}\n\nError:\nnone\n\nMalformed events: 0\nMalformed samples:\nnone`;
 
   assert.ok(Buffer.byteLength(formatted) <= COLLECTED_OUTPUT_MAX_BYTES);
   assert.equal(formatted.split("Output:\n").length - 1, 1);
@@ -146,7 +188,7 @@ test("reports final cap counts in the formatted-payload domain after upstream ou
     }),
   );
   const notice = /\n\nOutput truncated: retained (\d+) of (\d+) bytes\.$/.exec(formatted);
-  const completeContent = `# Subagent result: job-42\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n\n## Diagnostics\n\nOutput:\npartial\n\nStderr:\n${stderr}\n\nOutput truncated: retained 500 of 1000 bytes.`;
+  const completeContent = `# Subagent result: job-42\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n- Usage: input 0, output 0, cache read 0, cache write 0, cost 0, turns 0\n\n## Diagnostics\n\nOutput:\npartial\n\nOutput capture truncated: retained 500 of 1000 bytes.\n\nStderr:\n${stderr}\n\nError:\nnone\n\nMalformed events: 0\nMalformed samples:\nnone`;
 
   assert.ok(notice);
   assert.equal(Number(notice[2]), Buffer.byteLength(completeContent));

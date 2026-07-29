@@ -374,6 +374,23 @@ test("retains only the newest 200 progress items", () => {
   assert.equal(progress?.at(-1)?.text, "event 200");
 });
 
+test("retains only the latest text progress alongside bounded non-text history", () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  const [job] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.ok(job);
+
+  for (let index = 0; index < 201; index += 1) {
+    runner.progress(0, { type: "tool", text: `event ${index}`, timestamp: index });
+  }
+  runner.progress(0, { type: "text", text: "partial one", timestamp: 202 });
+  runner.progress(0, { type: "text", text: "partial two", timestamp: 203 });
+
+  const progress = manager.get(job.id)?.progress ?? [];
+  assert.equal(progress.filter((item) => item.type === "tool").length, 200);
+  assert.deepEqual(progress.filter((item) => item.type === "text").map((item) => item.text), ["partial two"]);
+});
+
 test("notifies subscribers of changes and stops after unsubscription", async () => {
   const runner = new ControlledRunner();
   const manager = new JobManager({ runner });
@@ -431,6 +448,33 @@ test("maps process results to completed and failed states", async () => {
   assert.equal(manager.get(jobs[0]!.id)?.state, "failed");
   assert.equal(manager.get(jobs[1]!.id)?.state, "failed");
   assert.equal(manager.get(jobs[2]!.id)?.state, "failed");
+});
+
+test("preserves independent process diagnostics on failed jobs", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  const [job] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.ok(job);
+
+  runner.complete(0, failedResult({
+    stderr: "stderr warning",
+    errorMessage: "assistant error",
+    malformedEventCount: 2,
+    malformedEventSamples: ["bad event"],
+    outputTruncation: { originalBytes: 60_000, keptBytes: 50 * 1024 },
+    stderrTruncation: { originalBytes: 70_000, keptBytes: 50 * 1024 },
+  }));
+  await runner.flush();
+
+  assert.deepEqual(manager.get(job.id), {
+    ...manager.get(job.id),
+    stderr: "stderr warning",
+    errorMessage: "assistant error",
+    malformedEventCount: 2,
+    malformedEventSamples: ["bad event"],
+    outputTruncation: { originalBytes: 60_000, keptBytes: 50 * 1024 },
+    stderrTruncation: { originalBytes: 70_000, keptBytes: 50 * 1024 },
+  });
 });
 
 test("maps rejected process results to failed jobs", async () => {

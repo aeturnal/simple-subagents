@@ -15,8 +15,8 @@ class FakeChildProcess extends EventEmitter {
     return true;
   }
 
-  close(code: number | null = 0): void {
-    this.emit("close", code);
+  close(code: number | null = 0, signal?: NodeJS.Signals): void {
+    this.emit("close", code, signal);
   }
 }
 
@@ -261,6 +261,33 @@ test("reduces split assistant events into final output and accumulated usage", a
   assert.match(progress[0]?.text ?? "", /read/);
 });
 
+test("reduces split Pi text_delta updates into bounded latest text progress", async () => {
+  const { child, runner } = spawnedRunner();
+  const progress: ProgressItem[] = [];
+  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress: (item) => progress.push(item) });
+
+  child.stdout.emit("data", Buffer.from('{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","delta":"Hel'));
+  child.stdout.emit("data", Buffer.from('lo"}}\n{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","delta":" world"}}\n'));
+
+  assert.deepEqual(progress.map((item) => [item.type, item.text]), [["text", "Hello"], ["text", "Hello world"]]);
+  child.close();
+  await running.result;
+});
+
+test("resets partial text when a new assistant message starts", async () => {
+  const { child, runner } = spawnedRunner();
+  const progress: ProgressItem[] = [];
+  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress: (item) => progress.push(item) });
+
+  child.stdout.emit("data", Buffer.from('{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","delta":"old"}}\n'));
+  child.stdout.emit("data", Buffer.from('{"type":"message_start","message":{"role":"assistant"}}\n'));
+  child.stdout.emit("data", Buffer.from('{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","delta":"new"}}\n'));
+
+  assert.deepEqual(progress.map((item) => item.text), ["old", "", "new"]);
+  child.close();
+  await running.result;
+});
+
 test("streams every documented tool event through progress without retaining a capped history", async () => {
   const { child, runner } = spawnedRunner();
   const progress: ProgressItem[] = [];
@@ -290,6 +317,65 @@ test("resolves a spawn error as a failed result", async () => {
   const result = await running.result;
   assert.equal(result.exitCode, 1);
   assert.equal(result.errorMessage, "pi missing");
+});
+
+test("fails a child closed by an external signal even after assistant output", async () => {
+  const { child, runner } = spawnedRunner();
+  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} });
+
+  child.stdout.emit("data", Buffer.from('{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"partial answer"}]}}\n'));
+  child.close(null, "SIGTERM");
+
+  const result = await running.result;
+  assert.notEqual(result.exitCode, 0);
+  assert.equal(result.output, "partial answer");
+});
+
+test("settles error and close exactly once while cleaning listeners and cancellation timer", async () => {
+  const child = new FakeChildProcess();
+  const cleared: unknown[] = [];
+  const runner = new PiProcessRunner({
+    spawnProcess: () => child,
+    setTimer: () => "timer",
+    clearTimer: (timer) => { cleared.push(timer); },
+  });
+  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} });
+
+  await running.cancel();
+  child.emit("error", new Error("spawn failed"));
+  child.close(0);
+  const result = await running.result;
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.errorMessage, "spawn failed");
+  assert.deepEqual(cleared, ["timer"]);
+  assert.equal(child.listenerCount("error"), 0);
+  assert.equal(child.listenerCount("close"), 0);
+  assert.equal(child.stdout.listenerCount("data"), 0);
+  assert.equal(child.stderr.listenerCount("data"), 0);
+});
+
+test("bounds captured output, stderr, assistant errors, and malformed samples before returning a result", async () => {
+  const { child, runner } = spawnedRunner();
+  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} });
+  const oversized = "😀".repeat(15_000);
+
+  child.stdout.emit("data", Buffer.from(`not-json-${oversized}\n`));
+  child.stdout.emit("data", Buffer.from(`${JSON.stringify({
+    type: "message_end",
+    message: { role: "assistant", content: [{ type: "text", text: oversized }], errorMessage: oversized },
+  })}\n`));
+  child.stderr.emit("data", Buffer.from(oversized));
+  child.close(1);
+
+  const result = await running.result;
+  for (const text of [result.output, result.stderr, result.errorMessage ?? "", ...(result.malformedEventSamples ?? [])]) {
+    assert.ok(Buffer.byteLength(text, "utf8") <= 50 * 1024);
+    assert.doesNotMatch(text, /\uFFFD/);
+  }
+  assert.ok(result.outputTruncation);
+  assert.ok(result.stderrTruncation);
+  assert.ok((result.malformedEventSamples?.length ?? 0) > 0);
 });
 
 test("cancellation sends SIGTERM then SIGKILL after five seconds unless the process closes", async () => {
