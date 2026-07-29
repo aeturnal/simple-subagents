@@ -100,6 +100,22 @@ test("falls back to the pi command when the current script is unavailable", asyn
   }
 });
 
+test("falls back to the pi command for a Bun virtual current script", async () => {
+  const originalScript = process.argv[1] ?? "";
+  process.argv[1] = "/$bunfs/root/pi-script.mjs";
+
+  try {
+    const { child, runner, invocation } = spawnedRunner();
+    const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} });
+
+    assert.equal(invocation().command, "pi");
+    child.close();
+    await running.result;
+  } finally {
+    process.argv[1] = originalScript;
+  }
+});
+
 test("adds inherited thinking to the selected model but preserves an explicit profile suffix", async () => {
   const inherited = spawnedRunner();
   const inheritedRun = inherited.runner.run({
@@ -128,6 +144,22 @@ test("adds inherited thinking to the selected model but preserves an explicit pr
   await explicitRun.result;
 });
 
+test("adds inherited thinking after a colon-bearing model identifier", async () => {
+  const { child, runner, invocation } = spawnedRunner();
+  const running = runner.run({
+    cwd: "/workspace",
+    request: request(),
+    profile: profile({ systemPrompt: "" }),
+    parentModel: "ollama/llama3.1:8b",
+    thinkingLevel: "high",
+    onProgress() {},
+  });
+
+  assert.equal(argumentValue(invocation().args, "--model"), "ollama/llama3.1:8b:high");
+  child.close();
+  await running.result;
+});
+
 test("intersects named read-only profile tools with the read-only permission set", async () => {
   const { child, runner, invocation } = spawnedRunner();
   const running = runner.run({
@@ -138,6 +170,36 @@ test("intersects named read-only profile tools with the read-only permission set
   });
 
   assert.equal(argumentValue(invocation().args, "--tools"), "read");
+  child.close();
+  await running.result;
+});
+
+test("disables Pi default tools for a named profile without a tools list", async () => {
+  const { child, runner, invocation } = spawnedRunner();
+  const running = runner.run({
+    cwd: "/workspace",
+    request: request(false),
+    profile: profile({ tools: undefined }),
+    onProgress() {},
+  });
+
+  assert.ok(invocation().args.includes("--no-tools"));
+  assert.equal(argumentValue(invocation().args, "--tools"), undefined);
+  child.close();
+  await running.result;
+});
+
+test("disables Pi default tools when a named read-only profile requests only bash", async () => {
+  const { child, runner, invocation } = spawnedRunner();
+  const running = runner.run({
+    cwd: "/workspace",
+    request: request(false),
+    profile: profile({ tools: ["bash"] }),
+    onProgress() {},
+  });
+
+  assert.ok(invocation().args.includes("--no-tools"));
+  assert.equal(argumentValue(invocation().args, "--tools"), undefined);
   child.close();
   await running.result;
 });

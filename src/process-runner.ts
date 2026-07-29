@@ -7,6 +7,7 @@ import type { AgentProfile, JobRequest, ProgressItem, UsageStats } from "./types
 
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const WRITE_TOOLS = new Set(["read", "grep", "find", "ls", "bash", "edit", "write"]);
+const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 export interface ProcessRunOptions {
   cwd: string;
@@ -89,7 +90,8 @@ const getAssistantText = (message: Record<string, unknown>): string | undefined 
 
 const resolveModel = (profile: AgentProfile, parentModel?: string, thinkingLevel?: string): string | undefined => {
   const model = profile.model ?? parentModel;
-  if (!model || !thinkingLevel || model.includes(":")) return model;
+  const suffix = model?.slice(model.lastIndexOf(":") + 1);
+  if (!model || !thinkingLevel || (model.includes(":") && suffix && THINKING_LEVELS.has(suffix))) return model;
   return `${model}:${thinkingLevel}`;
 };
 
@@ -101,7 +103,9 @@ const getTools = (profile: AgentProfile, writeAccess: boolean): string[] => {
 
 const getPiInvocation = (args: string[]): { command: string; args: string[] } => {
   const currentScript = process.argv[1];
-  if (currentScript && existsSync(currentScript)) return { command: process.execPath, args: [currentScript, ...args] };
+  if (currentScript && !currentScript.startsWith("/$bunfs/root/") && existsSync(currentScript)) {
+    return { command: process.execPath, args: [currentScript, ...args] };
+  }
 
   const execName = basename(process.execPath).toLowerCase();
   if (!/^(node|bun)(\.exe)?$/.test(execName)) return { command: process.execPath, args };
@@ -138,6 +142,7 @@ export class PiProcessRunner implements ProcessRunner {
 
     const tools = getTools(options.profile, options.request.writeAccess);
     if (tools.length > 0) args.push("--tools", tools.join(","));
+    else if (options.profile.name !== "generic") args.push("--no-tools");
 
     let prompt: { dir: string; path: string } | undefined;
     let child: SpawnedProcess | undefined;
