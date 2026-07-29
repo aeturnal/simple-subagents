@@ -9,7 +9,7 @@
   "pi": { "extensions": ["./src/index.ts"] },
   "scripts": {
     "test": "tsx --test test/*.test.ts",
-    "test:unit": "tsx --test test/config-agents.test.ts",
+    "test:unit": "tsx --test test/config-agents.test.ts test/json-output.test.ts test/process-runner.test.ts test/job-manager.test.ts test/tools.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
