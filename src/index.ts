@@ -1,6 +1,7 @@
 import { CONFIG_DIR_NAME, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { join } from "node:path";
+import { registerSubagentsUi } from "./dashboard.js";
 import { discoverDefaultAgents, type DiscoverAgentsResult } from "./agents.js";
 import { loadConfig, type LoadConfigResult } from "./config.js";
 import { JobManager } from "./job-manager.js";
@@ -106,6 +107,7 @@ export function createSimpleSubagentsExtension(dependencies: ExtensionDependenci
     };
 
     registerSubagentTools(pi, services);
+    const removeSubagentsUi = registerSubagentsUi(pi, manager);
     pi.registerMessageRenderer("simple-subagents-ready", (message, { expanded, outputPad }, theme) => {
       const details = message.details as { jobIds?: string[] } | undefined;
       const ids = details?.jobIds?.join(", ") ?? "";
@@ -130,6 +132,7 @@ export function createSimpleSubagentsExtension(dependencies: ExtensionDependenci
     pi.on("session_shutdown", async () => {
       removeNotifier?.();
       removeNotifier = undefined;
+      removeSubagentsUi();
       shutdown ??= manager.shutdown();
       await shutdown;
     });

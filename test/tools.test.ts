@@ -482,8 +482,10 @@ class FakePi {
   readonly notifications: Array<[string, string]> = [];
   readonly confirmations: Array<[string, string]> = [];
   readonly messageRenderers = new Map<string, unknown>();
+  readonly commands = new Map<string, unknown>();
 
   registerTool(tool: any): void { this.tools.set(tool.name, tool); }
+  registerCommand(name: string, command: unknown): void { this.commands.set(name, command); }
   on(event: string, handler: (event: unknown, ctx: any) => unknown): void {
     const handlers = this.handlers.get(event) ?? [];
     handlers.push(handler);
