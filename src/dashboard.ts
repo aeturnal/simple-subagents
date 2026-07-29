@@ -53,6 +53,7 @@ export class SubagentsDashboard implements Component {
   private cachedWidth: number | undefined;
   private cachedLines: string[] | undefined;
   private refreshTimer: ReturnType<typeof globalThis.setInterval> | undefined;
+  private disposed = false;
   private readonly now: () => number;
   private readonly setIntervalFn: typeof globalThis.setInterval;
   private readonly clearIntervalFn: typeof globalThis.clearInterval;
@@ -148,6 +149,8 @@ export class SubagentsDashboard implements Component {
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     if (this.refreshTimer !== undefined) {
       this.clearIntervalFn(this.refreshTimer);
       this.refreshTimer = undefined;
@@ -198,10 +201,14 @@ export class SubagentsDashboard implements Component {
   private updateRefreshTimer(): void {
     const hasRunningJobs = this.jobs.some((job) => job.state === "running");
     if (hasRunningJobs && this.refreshTimer === undefined) this.refreshTimer = this.setIntervalFn(() => this.changed(), 1_000);
-    else if (!hasRunningJobs) this.dispose();
+    else if (!hasRunningJobs && this.refreshTimer !== undefined) {
+      this.clearIntervalFn(this.refreshTimer);
+      this.refreshTimer = undefined;
+    }
   }
 
   private actionFailed(action: "cancel" | "collect" | "discard"): void {
+    if (this.disposed) return;
     this.options.notify(`Could not ${action} subagent job.`);
     this.setJobs(this.options.manager.list());
   }

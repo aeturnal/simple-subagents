@@ -313,6 +313,36 @@ test("dashboard contains rejected cancellation and refreshes stale collect and d
   discardView.dispose();
 });
 
+test("dashboard ignores a rejected cancellation after it is closed", async () => {
+  const pi = new FakePi();
+  const timer = new ManualTimer();
+  const manager = new FakeManager([job("job-1", "running")]);
+  let rejectCancel: (reason?: unknown) => void = () => {};
+  manager.cancel = (id: string): Promise<Job> => {
+    manager.calls.push(`cancel:${id}`);
+    return new Promise((_resolve, reject) => { rejectCancel = reject; });
+  };
+  const view = dashboard(manager, pi, {
+    setInterval: timer.set,
+    clearInterval: timer.clear,
+  });
+
+  view.handleInput?.("c");
+  view.handleInput?.("\x1b");
+  const renderRequestsAtClose = pi.ui.renderRequests;
+  const notificationsAtClose = pi.ui.notifications.length;
+  assert.equal(timer.callbacks.size, 0);
+  assert.equal(timer.cleared.length, 1);
+
+  rejectCancel(new Error("cancel failed"));
+  await nextTurn();
+
+  assert.equal(timer.callbacks.size, 0);
+  assert.equal(timer.cleared.length, 1);
+  assert.equal(pi.ui.renderRequests, renderRequestsAtClose);
+  assert.equal(pi.ui.notifications.length, notificationsAtClose);
+});
+
 test("dashboard restricts cancel, collect, and discard to eligible selected states", async () => {
   const pi = new FakePi();
   const manager = new FakeManager([job("job-1", "queued"), job("job-2", "running"), job("job-3", "completed")]);
