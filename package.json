@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "description": "Lightweight background subagents for Pi",
   "type": "module",
+  "engines": { "node": ">=20" },
+  "exports": "./src/index.ts",
   "keywords": ["pi-package", "pi", "subagents"],
   "license": "MIT",
   "files": ["src", "README.md"],
