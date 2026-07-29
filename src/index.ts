@@ -37,14 +37,18 @@ export function installCompletionNotifier(pi: ExtensionAPI, manager: JobManager,
 
   const flush = () => {
     timer = undefined;
-    const ready = [...pending.entries()];
+    const candidates = [...pending.keys()];
     pending.clear();
+    const ready = candidates.flatMap((id) => {
+      const job = manager.get(id);
+      return job && terminal.has(job.state) ? [[job.id, job.state] as const] : [];
+    });
     if (ready.length === 0) return;
     const jobIds = ready.map(([id]) => id);
-    const summary = `Ready jobs: ${ready.map(([id, state]) => `${id} (${state})`).join(", ")}.`;
+    const summary = `Jobs may be ready: ${ready.map(([id, state]) => `${id} (${state})`).join(", ")}.`;
     pi.sendMessage({
       customType: "simple-subagents-ready",
-      content: `${summary}\nAsk the user whether and when they want to collect these results.`,
+      content: `${summary}\nCheck their current state. Collect any still-uncollected results needed by the active task; otherwise no action is required.`,
       display: true,
       details: { jobIds },
     }, { deliverAs: "followUp", triggerTurn: true });
@@ -114,7 +118,7 @@ export function createSimpleSubagentsExtension(dependencies: ExtensionDependenci
       const details = message.details as { jobIds?: string[] } | undefined;
       const ids = details?.jobIds?.join(", ") ?? "";
       const detail = expanded && ids ? `\n${theme.fg("dim", ids)}` : "";
-      const content = typeof message.content === "string" ? message.content : "Subagent jobs are ready.";
+      const content = typeof message.content === "string" ? message.content : "Jobs may be ready.";
       return new Text(theme.fg("accent", content) + detail, outputPad, 0);
     });
 
