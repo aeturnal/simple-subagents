@@ -39,7 +39,11 @@ export interface SubagentsDashboardOptions {
   pi: ExtensionAPI;
   theme: DashboardTheme;
   requestRender(): void;
+  notify(message: string): void;
   close(): void;
+  now?: () => number;
+  setInterval?: typeof globalThis.setInterval;
+  clearInterval?: typeof globalThis.clearInterval;
 }
 
 export class SubagentsDashboard implements Component {
@@ -48,14 +52,28 @@ export class SubagentsDashboard implements Component {
   private detailed = false;
   private cachedWidth: number | undefined;
   private cachedLines: string[] | undefined;
+  private refreshTimer: ReturnType<typeof globalThis.setInterval> | undefined;
+  private readonly now: () => number;
+  private readonly setIntervalFn: typeof globalThis.setInterval;
+  private readonly clearIntervalFn: typeof globalThis.clearInterval;
 
   constructor(private readonly options: SubagentsDashboardOptions) {
     this.jobs = options.jobs;
+    this.now = options.now ?? Date.now;
+    this.setIntervalFn = options.setInterval ?? globalThis.setInterval;
+    this.clearIntervalFn = options.clearInterval ?? globalThis.clearInterval;
+    this.updateRefreshTimer();
   }
 
   setJobs(jobs: readonly Job[]): void {
+    const priorJobs = this.visibleJobs();
+    const priorIndex = this.selected;
+    const selectedId = priorJobs[priorIndex]?.id;
     this.jobs = jobs;
-    this.selected = Math.min(this.selected, Math.max(0, this.visibleJobs().length - 1));
+    const visible = this.visibleJobs();
+    const preservedIndex = selectedId === undefined ? -1 : visible.findIndex((job) => job.id === selectedId);
+    this.selected = preservedIndex >= 0 ? preservedIndex : Math.min(priorIndex, Math.max(0, visible.length - 1));
+    this.updateRefreshTimer();
     this.changed();
   }
 
@@ -65,23 +83,36 @@ export class SubagentsDashboard implements Component {
     else if (matchesKey(data, Key.down) && this.selected < jobs.length - 1) this.selected += 1;
     else if (matchesKey(data, Key.enter)) this.detailed = !this.detailed;
     else if (matchesKey(data, Key.escape)) {
+      this.dispose();
       this.options.close();
       return;
     } else {
       const selected = jobs[this.selected];
       if (selected && matchesKey(data, "c") && (selected.state === "queued" || selected.state === "running")) {
-        void this.options.manager.cancel(selected.id);
+        try {
+          void this.options.manager.cancel(selected.id).catch(() => this.actionFailed("cancel"));
+        } catch {
+          this.actionFailed("cancel");
+        }
       } else if (selected && matchesKey(data, "x") && this.isInbox(selected)) {
-        const formatted = formatCollectedResult(selected);
-        this.options.manager.collect(selected.id);
-        this.options.pi.sendMessage({
-          customType: "simple-subagents-result",
-          content: formatted,
-          display: true,
-          details: { jobId: selected.id },
-        }, { deliverAs: "nextTurn" });
+        try {
+          const formatted = formatCollectedResult(selected);
+          this.options.manager.collect(selected.id);
+          this.options.pi.sendMessage({
+            customType: "simple-subagents-result",
+            content: formatted,
+            display: true,
+            details: { jobId: selected.id },
+          }, { deliverAs: "nextTurn" });
+        } catch {
+          this.actionFailed("collect");
+        }
       } else if (selected && matchesKey(data, "d") && this.isInbox(selected)) {
-        this.options.manager.discard(selected.id);
+        try {
+          this.options.manager.discard(selected.id);
+        } catch {
+          this.actionFailed("discard");
+        }
       } else return;
     }
     this.changed();
@@ -116,8 +147,19 @@ export class SubagentsDashboard implements Component {
     this.cachedLines = undefined;
   }
 
+  dispose(): void {
+    if (this.refreshTimer !== undefined) {
+      this.clearIntervalFn(this.refreshTimer);
+      this.refreshTimer = undefined;
+    }
+  }
+
   private visibleJobs(): Job[] {
-    return this.jobs.filter((job) => job.state !== "collected" && job.state !== "discarded");
+    return [
+      ...this.jobs.filter((job) => job.state === "queued"),
+      ...this.jobs.filter((job) => job.state === "running"),
+      ...this.jobs.filter((job) => this.isInbox(job)),
+    ];
   }
 
   private isInbox(job: Job): boolean {
@@ -127,7 +169,7 @@ export class SubagentsDashboard implements Component {
   private row(job: Job, selected: boolean): string {
     const marker = selected ? this.options.theme.fg("accent", "> ") : "  ";
     const writable = job.request.writeAccess ? "W " : "";
-    const elapsed = job.state === "running" && job.startedAt ? ` ${Math.max(0, Math.floor((Date.now() - job.startedAt) / 1000))}s` : "";
+    const elapsed = job.state === "running" && job.startedAt ? ` ${Math.max(0, Math.floor((this.now() - job.startedAt) / 1000))}s` : "";
     return `${marker}${job.id} ${writable}${job.state}${elapsed} · ${job.request.task}`;
   }
 
@@ -143,14 +185,25 @@ export class SubagentsDashboard implements Component {
     wrap("Profile: ", job.profile.name);
     wrap("Access: ", job.request.writeAccess ? "write" : "read-only");
     wrap("Created: ", new Date(job.createdAt).toISOString());
-    if (job.startedAt) wrap("Started: ", new Date(job.startedAt).toISOString());
-    if (job.finishedAt) wrap("Finished: ", new Date(job.finishedAt).toISOString());
+    wrap("Started: ", job.startedAt ? new Date(job.startedAt).toISOString() : "not started");
+    wrap("Finished: ", job.finishedAt ? new Date(job.finishedAt).toISOString() : "not finished");
     wrap("Progress: ", job.progress.slice(-3).map((item) => item.text).join(" · ") || "none");
     wrap("Output: ", job.output || "none");
-    if (job.stderr) wrap("Stderr: ", job.stderr);
+    wrap("Stderr: ", job.stderr || "none");
     wrap("Usage: ", `input ${job.usage.input}, output ${job.usage.output}, cache ${job.usage.cacheRead + job.usage.cacheWrite}, ${job.usage.turns} turns`);
-    if (job.truncation) wrap("Truncated: ", `${job.truncation.keptBytes} of ${job.truncation.originalBytes} bytes retained`);
+    wrap("Truncated: ", job.truncation ? `${job.truncation.keptBytes} of ${job.truncation.originalBytes} bytes retained` : "not truncated");
     return lines.map((item) => truncateToWidth(item, width));
+  }
+
+  private updateRefreshTimer(): void {
+    const hasRunningJobs = this.jobs.some((job) => job.state === "running");
+    if (hasRunningJobs && this.refreshTimer === undefined) this.refreshTimer = this.setIntervalFn(() => this.changed(), 1_000);
+    else if (!hasRunningJobs) this.dispose();
+  }
+
+  private actionFailed(action: "cancel" | "collect" | "discard"): void {
+    this.options.notify(`Could not ${action} subagent job.`);
+    this.setJobs(this.options.manager.list());
   }
 
   private changed(): void {
@@ -183,32 +236,36 @@ export function registerSubagentsUi(pi: ExtensionAPI, manager: JobManager): () =
         return;
       }
       let unsubscribe: (() => void) | undefined;
+      let component: SubagentsDashboard | undefined;
       let closed = false;
       const close = (done: () => void): void => {
         if (closed) return;
         closed = true;
+        component?.dispose();
         unsubscribe?.();
         unsubscribe = undefined;
         done();
       };
       try {
         await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-          const component = new SubagentsDashboard({
+          component = new SubagentsDashboard({
             jobs: manager.list(),
             manager,
             pi,
             theme,
             requestRender: () => tui.requestRender(),
+            notify: (message) => ctx.ui.notify(message, "error"),
             close: () => close(done),
           });
           unsubscribe = manager.subscribe((jobs) => {
-            component.setJobs(jobs);
+            component?.setJobs(jobs);
           });
           return component;
         });
       } finally {
         if (!closed) {
           closed = true;
+          component?.dispose();
           unsubscribe?.();
           unsubscribe = undefined;
         }
