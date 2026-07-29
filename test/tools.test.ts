@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { join } from "node:path";
 import {
   ControlParams,
   StartParams,
@@ -374,14 +373,35 @@ test("completion notifier cleanup clears a pending timer and unsubscribes", () =
   assert.equal(listener, undefined);
 });
 
+test("runtime loads config only from Pi's agent directory, never the project config directory", async () => {
+  const pi = new FakePi();
+  const configPaths: string[] = [];
+  const dependencies: ExtensionDependencies & { getAgentDir: () => string } = {
+    createManager: () => new JobManager({ runner: new ControlledRunner() }),
+    getAgentDir: () => "/pi-agent",
+    loadConfig: async (path) => {
+      configPaths.push(path);
+      return { config: { confirmWrites: false } };
+    },
+    discoverProfiles: async () => ({ agents: [], diagnostics: [] }),
+  };
+
+  createSimpleSubagentsExtension(dependencies)(pi as never);
+  await pi.emit("session_start", {}, fakeContext({ hasUI: false }, pi));
+
+  assert.deepEqual(configPaths, ["/pi-agent/simple-subagents.json"]);
+  assert.equal(configPaths.includes("/workspace/.pi/simple-subagents.json"), false);
+});
+
 test("runtime loads config and profiles, surfaces diagnostics, confirms writable starts once, and shuts down cleanly", async () => {
   const pi = new FakePi();
   const runner = new ControlledRunner();
   const manager = new JobManager({ runner });
   const dependencies: ExtensionDependencies = {
     createManager: () => manager,
+    getAgentDir: () => "/pi-agent",
     loadConfig: async (path) => {
-      assert.equal(path, join("/workspace", ".pi", "simple-subagents.json"));
+      assert.equal(path, "/pi-agent/simple-subagents.json");
       return { config: { confirmWrites: true }, warning: "config warning" };
     },
     discoverProfiles: async () => ({ agents: [{ ...profile, name: "writer" }], diagnostics: ["profile warning"] }),

@@ -1,4 +1,4 @@
-import { CONFIG_DIR_NAME, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { join } from "node:path";
 import { registerSubagentsUi } from "./dashboard.js";
@@ -13,6 +13,7 @@ export interface ExtensionDependencies {
   createManager?: () => JobManager;
   loadConfig?: (path: string) => Promise<LoadConfigResult>;
   discoverProfiles?: () => Promise<DiscoverAgentsResult>;
+  getAgentDir?: () => string;
   setTimer?: (callback: () => void, delay: number) => unknown;
   clearTimer?: (timer: unknown) => void;
 }
@@ -79,6 +80,7 @@ export function createSimpleSubagentsExtension(dependencies: ExtensionDependenci
     const manager = dependencies.createManager?.() ?? new JobManager({ runner: new PiProcessRunner() });
     const readConfig = dependencies.loadConfig ?? loadConfig;
     const discoverProfiles = dependencies.discoverProfiles ?? discoverDefaultAgents;
+    const resolveAgentDir = dependencies.getAgentDir ?? getAgentDir;
     const timers: TimerDependencies = {
       setTimer: dependencies.setTimer ?? ((callback, delay) => setTimeout(callback, delay)),
       clearTimer: dependencies.clearTimer ?? ((timer) => clearTimeout(timer as NodeJS.Timeout)),
@@ -118,7 +120,7 @@ export function createSimpleSubagentsExtension(dependencies: ExtensionDependenci
 
     pi.on("session_start", async (_event, ctx) => {
       const [loadedConfig, discovered] = await Promise.all([
-        readConfig(join(ctx.cwd, CONFIG_DIR_NAME, "simple-subagents.json")),
+        readConfig(join(resolveAgentDir(), "simple-subagents.json")),
         discoverProfiles(),
       ]);
       config = loadedConfig.config;

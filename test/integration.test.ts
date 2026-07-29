@@ -61,6 +61,6 @@ integrationTest("real Pi reads a file with the generic read-only profile", { tim
 
   const result = await running.result;
   assert.equal(result.exitCode, 0);
-  assert.notEqual(result.output.trim(), "");
-  assert.ok(result.output.includes(answer), `Pi output: ${JSON.stringify(result.output)}\nPi stderr: ${result.stderr}`);
+  assert.notEqual(result.output, "");
+  assert.equal(result.output, answer, `Pi output: ${JSON.stringify(result.output)}\nPi stderr: ${result.stderr}`);
 });
