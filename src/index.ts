@@ -94,12 +94,12 @@ export function createSimpleSubagentsExtension(dependencies: ExtensionDependenci
       manager,
       getProfiles: async () => profiles,
       confirmWritable: async (requests: readonly JobRequest[], ctx: ExtensionContext) => {
-        if (!config.confirmWrites || requests.length === 0) return true;
-        if (!ctx.hasUI) return false;
-        return ctx.ui.confirm(
+        if (!config.confirmWrites || requests.length === 0) return "approved";
+        if (!ctx.hasUI) return "unavailable";
+        return (await ctx.ui.confirm(
           "Allow writable subagents?",
           `Allow ${requests.length} writable background job${requests.length === 1 ? "" : "s"}? Their work should not overlap.`,
-        );
+        )) ? "approved" : "declined";
       },
       defaults: (ctx) => ({
         cwd: ctx.cwd,

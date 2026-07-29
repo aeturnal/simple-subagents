@@ -62,7 +62,7 @@ const createServices = (runner = new ControlledRunner(), overrides: Partial<Tool
   const services: ToolServices = {
     manager,
     getProfiles: async () => new Map([["generic", { ...profile, name: "generic", source: "builtin" as const }], [profile.name, profile]]),
-    confirmWritable: async () => true,
+    confirmWritable: async () => "approved",
     defaults: () => ({ cwd: "/workspace", parentModel: "parent/model", thinkingLevel: "high" }),
     ...overrides,
   };
@@ -91,23 +91,49 @@ test("startJobs validates an over-eight batch without starting any jobs", async 
   assert.equal(runner.started.length, 0);
 });
 
-test("startJobs asks once only for a writable batch and respects rejection", async () => {
+test("startJobs asks once only for an approved writable batch", async () => {
   let confirmations = 0;
   const { services, runner } = createServices(undefined, {
     confirmWritable: async (requests) => {
       confirmations += 1;
       assert.deepEqual(requests.map((request) => request.task), ["write one", "write two"]);
-      return false;
+      return "approved";
     },
   });
 
   const readOnly = await startJobs({ tasks: [{ task: "read" }] }, services, {} as never);
-  const rejected = await startJobs({ tasks: [{ task: "write one", writeAccess: true }, { task: "write two", writeAccess: true }] }, services, {} as never);
+  const approved = await startJobs({ tasks: [{ task: "write one", writeAccess: true }, { task: "write two", writeAccess: true }] }, services, {} as never);
 
   assert.match(text(readOnly), /Started 1 job/);
-  assert.match(text(rejected), /not approved/i);
+  assert.match(text(approved), /Started 2 jobs/);
   assert.equal(confirmations, 1);
-  assert.equal(runner.started.length, 1);
+  assert.equal(runner.started.length, 3);
+});
+
+test("startJobs reports writable jobs declined without enqueueing", async () => {
+  const { services, runner } = createServices(undefined, {
+    confirmWritable: async () => "declined",
+  });
+
+  const declined = await startJobs({ tasks: [{ task: "write", writeAccess: true }] }, services, {} as never);
+
+  assert.equal(declined.content[0]?.text, "Writable jobs were declined.");
+  assert.deepEqual(declined.details.diagnostics, ["Writable jobs were declined."]);
+  assert.deepEqual(services.manager.list(), []);
+  assert.equal(runner.started.length, 0);
+});
+
+test("startJobs reports writable confirmation requiring interactive UI without enqueueing", async () => {
+  const { services, runner } = createServices(undefined, {
+    confirmWritable: async () => "unavailable",
+  });
+
+  const unavailable = await startJobs({ tasks: [{ task: "write", writeAccess: true }] }, services, {} as never);
+
+  assert.equal(unavailable.content[0]?.text, "Writable confirmation requires interactive UI.");
+  assert.deepEqual(unavailable.details.diagnostics, ["Writable confirmation requires interactive UI."]);
+  assert.deepEqual(services.manager.list(), []);
+  assert.equal(runner.started.length, 0);
 });
 
 test("startJobs returns an ordinary diagnostic for an unknown profile", async () => {
@@ -268,7 +294,7 @@ test("tool renderers preserve task detail when expanded and keep compact control
   const unknown = await statusJobs({ id: "missing" }, services);
   const declined = await startJobs(
     { tasks: [{ task: "write", writeAccess: true }] },
-    { ...services, confirmWritable: async () => false },
+    { ...services, confirmWritable: async () => "declined" },
     {} as never,
   );
   const invalid = await controlJobs({ action: "collect", ids: ["job-2"] }, services);
@@ -280,7 +306,7 @@ test("tool renderers preserve task detail when expanded and keep compact control
     render("subagent_control", invalid, false),
   ]) assert.doesNotMatch(rendered, /No jobs/);
   assert.match(render("subagent_status", unknown, true), /Unknown job: missing/);
-  assert.match(render("subagent_start", declined, true), /not approved/i);
+  assert.match(render("subagent_start", declined, true), /Writable jobs were declined\./);
   assert.match(render("subagent_control", invalid, true), /Cannot collect/i);
 
   await controlJobs({ action: "cancel", ids: ["job-2"] }, services);
@@ -452,6 +478,28 @@ test("runtime loads config and profiles, surfaces diagnostics, confirms writable
   await pi.emit("session_shutdown", {}, fakeContext({ hasUI: true }, pi));
 });
 
+test("runtime reports writable jobs declined when UI confirmation rejects", async () => {
+  const pi = new FakePi();
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  createSimpleSubagentsExtension({
+    createManager: () => manager,
+    loadConfig: async () => ({ config: { confirmWrites: true } }),
+    discoverProfiles: async () => ({ agents: [{ ...profile, name: "writer" }], diagnostics: [] }),
+  })(pi as never);
+  await pi.emit("session_start", {}, fakeContext({ hasUI: true, confirmResult: false }, pi));
+
+  const start = pi.tools.get("subagent_start");
+  assert.ok(start);
+  const declined = await start.execute("call", { tasks: [{ task: "write", agent: "writer", writeAccess: true }] }, undefined, undefined, fakeContext({ hasUI: true, confirmResult: false }, pi));
+
+  assert.equal(declined.content[0]?.text, "Writable jobs were declined.");
+  assert.deepEqual(declined.details.diagnostics, ["Writable jobs were declined."]);
+  assert.equal(pi.confirmations.length, 1);
+  assert.deepEqual(manager.list(), []);
+  assert.equal(runner.started.length, 0);
+});
+
 test("runtime starts writable jobs without confirmation when configuration disables it", async () => {
   const pi = new FakePi();
   const runner = new ControlledRunner();
@@ -474,7 +522,7 @@ test("runtime starts writable jobs without confirmation when configuration disab
   await stopping;
 });
 
-test("runtime rejects writable starts without UI when confirmation is configured and registers renderers", async () => {
+test("runtime reports writable confirmation requiring interactive UI when confirmation cannot be shown", async () => {
   const pi = new FakePi();
   const manager = new JobManager({ runner: new ControlledRunner() });
   createSimpleSubagentsExtension({
@@ -488,8 +536,9 @@ test("runtime rejects writable starts without UI when confirmation is configured
   assert.ok(start);
   const result = await start.execute("call", { tasks: [{ task: "write", agent: "writer", writeAccess: true }] }, undefined, undefined, fakeContext({ hasUI: false }, pi));
 
-  assert.match(text(result), /not approved/i);
-  assert.equal(manager.list().length, 0);
+  assert.equal(result.content[0]?.text, "Writable confirmation requires interactive UI.");
+  assert.deepEqual(result.details.diagnostics, ["Writable confirmation requires interactive UI."]);
+  assert.deepEqual(manager.list(), []);
   assert.equal(pi.messageRenderers.has("simple-subagents-ready"), true);
   assert.ok(pi.tools.get("subagent_start")?.renderCall);
   assert.ok(pi.tools.get("subagent_start")?.renderResult);
@@ -539,7 +588,7 @@ class FakePi {
   registerMessageRenderer(type: string, renderer: unknown): void { this.messageRenderers.set(type, renderer); }
 }
 
-const fakeContext = ({ hasUI }: { hasUI: boolean }, pi: FakePi) => ({
+const fakeContext = ({ hasUI, confirmResult = true }: { hasUI: boolean; confirmResult?: boolean }, pi: FakePi) => ({
   cwd: "/workspace",
   hasUI,
   model: { provider: "parent", id: "model" },
@@ -548,7 +597,7 @@ const fakeContext = ({ hasUI }: { hasUI: boolean }, pi: FakePi) => ({
     notify: (message: string, level: string) => { pi.notifications.push([message, level]); },
     confirm: async (title: string, message: string) => {
       pi.confirmations.push([title, message]);
-      return true;
+      return confirmResult;
     },
   },
 });

@@ -25,11 +25,12 @@ export const ControlParams = Type.Object({
 export type StartInput = Static<typeof StartParams>;
 export type StatusInput = Static<typeof StatusParams>;
 export type ControlInput = Static<typeof ControlParams>;
+export type WriteConfirmation = "approved" | "declined" | "unavailable";
 
 export interface ToolServices {
   manager: JobManager;
   getProfiles(): Promise<ReadonlyMap<string, AgentProfile>>;
-  confirmWritable(requests: readonly JobRequest[], ctx: ExtensionContext): Promise<boolean>;
+  confirmWritable(requests: readonly JobRequest[], ctx: ExtensionContext): Promise<WriteConfirmation>;
   defaults(ctx: ExtensionContext): { cwd: string; parentModel?: string; thinkingLevel?: string };
 }
 
@@ -74,8 +75,16 @@ export async function startJobs(input: StartInput, services: ToolServices, ctx: 
     return response(diagnostic, [], [diagnostic], "start");
   }
   const writable = requests.filter((request) => request.writeAccess);
-  if (writable.length > 0 && !(await services.confirmWritable(writable, ctx))) {
-    return response("Writable jobs were not approved.", [], [], "start");
+  if (writable.length > 0) {
+    const outcome = await services.confirmWritable(writable, ctx);
+    if (outcome === "declined") {
+      const diagnostic = "Writable jobs were declined.";
+      return response(diagnostic, [], [diagnostic], "start");
+    }
+    if (outcome === "unavailable") {
+      const diagnostic = "Writable confirmation requires interactive UI.";
+      return response(diagnostic, [], [diagnostic], "start");
+    }
   }
 
   const jobs = services.manager.enqueue(requests, profiles, services.defaults(ctx));
