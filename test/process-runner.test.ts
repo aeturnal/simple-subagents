@@ -301,6 +301,32 @@ test("records cumulative partial metadata across multibyte deltas and resets it 
   await running.result;
 });
 
+test("keeps a UTF-8-safe partial prefix after a multibyte truncation boundary", async () => {
+  const { child, runner } = spawnedRunner();
+  const progress: ProgressItem[] = [];
+  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress: (item) => progress.push(item) });
+  const expected = "a".repeat(CAPTURED_TEXT_MAX_BYTES - 1);
+  const first = expected + "😀";
+  const second = "x";
+
+  for (const delta of [first, second]) {
+    child.stdout.emit("data", Buffer.from(`${JSON.stringify({ type: "message_update", message: { role: "assistant" }, assistantMessageEvent: { type: "text_delta", delta } })}\n`));
+  }
+
+  const latest = progress.at(-1);
+  assert.ok(latest);
+  assert.equal(latest.text, expected);
+  assert.equal(latest.text.includes(second), false);
+  assert.ok(Buffer.byteLength(latest.text, "utf8") <= CAPTURED_TEXT_MAX_BYTES);
+  assert.deepEqual(latest.truncation, {
+    originalBytes: Buffer.byteLength(first + second, "utf8"),
+    keptBytes: Buffer.byteLength(expected, "utf8"),
+  });
+
+  child.close();
+  await running.result;
+});
+
 test("resets partial text when a new assistant message starts", async () => {
   const { child, runner } = spawnedRunner();
   const progress: ProgressItem[] = [];

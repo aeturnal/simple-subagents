@@ -158,6 +158,7 @@ export class PiProcessRunner implements ProcessRunner {
     let output = "";
     let partialOutput = "";
     let partialOriginalBytes = 0;
+    let partialCaptureExhausted = false;
     let outputTruncation: TextTruncation | undefined;
     let stderr = "";
     let stderrOriginalBytes = 0;
@@ -210,6 +211,7 @@ export class PiProcessRunner implements ProcessRunner {
           const hadPartialOutput = partialOutput.length > 0;
           partialOutput = "";
           partialOriginalBytes = 0;
+          partialCaptureExhausted = false;
           if (hadPartialOutput) emitPartial();
         }
         return;
@@ -222,7 +224,11 @@ export class PiProcessRunner implements ProcessRunner {
           const delta = asString(assistantEvent.delta);
           if (delta !== undefined) {
             partialOriginalBytes += Buffer.byteLength(delta, "utf8");
-            partialOutput = truncateUtf8(partialOutput + delta, CAPTURED_TEXT_MAX_BYTES).text;
+            if (!partialCaptureExhausted) {
+              const captured = truncateUtf8(partialOutput + delta, CAPTURED_TEXT_MAX_BYTES);
+              partialOutput = captured.text;
+              partialCaptureExhausted = captured.truncation !== undefined;
+            }
             emitPartial();
           }
         }
@@ -242,9 +248,10 @@ export class PiProcessRunner implements ProcessRunner {
         }
         if (partialOutput) {
           partialOutput = "";
-          partialOriginalBytes = 0;
           emitPartial();
         }
+        partialOriginalBytes = 0;
+        partialCaptureExhausted = false;
         const eventUsage = asRecord(message.usage);
         if (eventUsage) {
           usage.input += asNumber(eventUsage.input);
