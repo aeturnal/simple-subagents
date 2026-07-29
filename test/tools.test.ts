@@ -155,6 +155,25 @@ test("controlJobs handles multi-ID cancellation and leaves unknown IDs as diagno
   assert.equal(runner.started[1]?.cancelled, 1);
 });
 
+test("controlJobs prevalidates terminal cancellation while preserving cancelled idempotence", async () => {
+  const { services, runner } = createServices();
+  await startJobs({ tasks: [{ task: "settled" }, { task: "still running" }] }, services, {} as never);
+  runner.started[0]?.resolve(completed());
+  await runner.flush();
+
+  const mixed = await controlJobs({ action: "cancel", ids: ["job-1", "job-2"] }, services);
+
+  assert.deepEqual(mixed.details.jobs.map((job) => [job.id, job.state]), [["job-2", "cancelled"]]);
+  assert.deepEqual(mixed.details.diagnostics, ["Cannot cancel job in completed state"]);
+  assert.equal(runner.started[0]?.cancelled, 0);
+  assert.equal(runner.started[1]?.cancelled, 1);
+
+  const repeated = await controlJobs({ action: "cancel", ids: ["job-2"] }, services);
+
+  assert.deepEqual(repeated.details.jobs.map((job) => [job.id, job.state]), [["job-2", "cancelled"]]);
+  assert.deepEqual(repeated.details.diagnostics, []);
+});
+
 test("controlJobs formats the terminal snapshot before collecting it", async () => {
   const { services, runner } = createServices();
   await startJobs({ tasks: [{ task: "find the answer" }] }, services, {} as never);
@@ -198,7 +217,7 @@ test("controlJobs discards multiple completed jobs without placing output into m
   assert.doesNotMatch(text(result), /do not surface/);
 });
 
-test("tool renderers summarize jobs and expose collected output or diagnostics when expanded", async () => {
+test("tool renderers preserve task detail when expanded and keep compact control outcomes concise", async () => {
   const pi = new FakePi();
   const { services, runner } = createServices();
   registerSubagentTools(pi as never, services);
@@ -211,9 +230,17 @@ test("tool renderers summarize jobs and expose collected output or diagnostics w
   assert.match(compactStart, /Started 2 jobs/);
   assert.match(compactStart, /… job-1 running/);
   assert.match(compactStart, /… job-2 running/);
+  assert.match(render("subagent_start", started, true), /  one\s+  two/);
 
   runner.started[0]?.resolve(completed("collected secret"));
   await runner.flush();
+  const successfulStatus = await statusJobs({ id: "job-1" }, services);
+  const compactStatus = render("subagent_status", successfulStatus, false);
+  assert.match(compactStatus, /Jobs: 1/);
+  assert.match(compactStatus, /✓ job-1 completed/);
+  assert.doesNotMatch(compactStatus, /  one/);
+  assert.match(render("subagent_status", successfulStatus, true), /  one/);
+
   const collected = await controlJobs({ action: "collect", ids: ["job-1"] }, services);
   const compactCollect = render("subagent_control", collected, false);
   assert.match(compactCollect, /Collected 1 result/);
@@ -228,14 +255,22 @@ test("tool renderers summarize jobs and expose collected output or diagnostics w
     {} as never,
   );
   const invalid = await controlJobs({ action: "collect", ids: ["job-2"] }, services);
+  const compactUnknown = render("subagent_status", unknown, false);
+  assert.match(compactUnknown, /Unknown job: missing/);
   for (const rendered of [
-    render("subagent_status", unknown, false),
+    compactUnknown,
     render("subagent_start", declined, false),
     render("subagent_control", invalid, false),
   ]) assert.doesNotMatch(rendered, /No jobs/);
   assert.match(render("subagent_status", unknown, true), /Unknown job: missing/);
   assert.match(render("subagent_start", declined, true), /not approved/i);
   assert.match(render("subagent_control", invalid, true), /Cannot collect/i);
+
+  await controlJobs({ action: "cancel", ids: ["job-2"] }, services);
+  const discarded = await controlJobs({ action: "discard", ids: ["job-2"] }, services);
+  const compactDiscard = render("subagent_control", discarded, false);
+  assert.match(compactDiscard, /Discarded 1 job/);
+  assert.match(compactDiscard, /⌫ job-2 discarded/);
 });
 
 test("startJobs propagates profile and default resolution failures", async () => {

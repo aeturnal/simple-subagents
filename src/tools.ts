@@ -104,6 +104,10 @@ export async function controlJobs(input: ControlInput, services: ToolServices): 
       diagnostics.push(`Unknown job: ${id}`);
       continue;
     }
+    if (input.action === "cancel" && !["queued", "running", "cancelled"].includes(job.state)) {
+      diagnostics.push(`Cannot cancel job in ${job.state} state`);
+      continue;
+    }
     if (input.action === "collect" && !["completed", "failed", "cancelled", "collected"].includes(job.state)) {
       diagnostics.push(`Cannot collect job in ${job.state} state`);
       continue;
@@ -152,7 +156,9 @@ const renderToolResult = (result: ToolResponse, expanded: boolean, theme: { fg(c
   const compact = [heading, ...jobs.map((job) => `${icon(job.state)} ${job.id} ${job.state}`), ...diagnostics].filter(Boolean).join("\n") || content;
   if (!expanded) return theme.fg("muted", compact);
 
-  const detail = operation === "collect" || diagnostics.length > 0 ? content : "";
+  const detail = operation === "collect" || diagnostics.length > 0 ? content
+    : operation === "start" || operation === "status" ? jobs.map((job) => `  ${job.request.task}`).join("\n")
+      : "";
   return theme.fg("muted", [compact, detail].filter(Boolean).join("\n\n"));
 };
 
