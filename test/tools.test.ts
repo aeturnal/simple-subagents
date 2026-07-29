@@ -404,6 +404,9 @@ test("registered tools expose strict schema boundaries and required guidance", (
     assert.match(description, /self-contained/i);
     assert.match(description, /read-only/i);
     assert.match(description, /collected.*context/i);
+    assert.match(description, /each job.*50 KiB/i);
+    assert.match(description, /batched collection.*50 KiB aggregate/i);
+    assert.match(description, /concise.*split.*collect.*individually/i);
     assert.match(description, /non-overlapping/i);
   }
 });

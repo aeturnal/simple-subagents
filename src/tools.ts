@@ -143,6 +143,8 @@ const description = [
   "Start self-contained background tasks.",
   "Jobs are read-only unless writes are needed.",
   "Only collected output enters context.",
+  "Each job's collected result is capped at 50 KiB, and batched collection shares a 50 KiB aggregate cap.",
+  "Request concise output, split broad investigations, and collect large results individually.",
   "Concurrent writable jobs should receive non-overlapping work.",
 ].join(" ");
 
