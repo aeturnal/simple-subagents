@@ -34,9 +34,11 @@ export function installCompletionNotifier(pi: ExtensionAPI, manager: JobManager,
   const notified = new Set<string>();
   let initialized = false;
   let timer: unknown;
+  let active = true;
 
   const flush = () => {
     timer = undefined;
+    if (!active) return;
     const candidates = [...pending.keys()];
     pending.clear();
     const ready = candidates.flatMap((id) => {
@@ -59,6 +61,7 @@ export function installCompletionNotifier(pi: ExtensionAPI, manager: JobManager,
   };
 
   const unsubscribe = manager.subscribe((jobs) => {
+    if (!active) return;
     if (!initialized) {
       for (const job of jobs) previous.set(job.id, job.state);
       initialized = true;
@@ -76,6 +79,8 @@ export function installCompletionNotifier(pi: ExtensionAPI, manager: JobManager,
   });
 
   return () => {
+    if (!active) return;
+    active = false;
     unsubscribe();
     if (timer !== undefined) timers.clearTimer(timer);
     timer = undefined;

@@ -638,6 +638,56 @@ test("completion notifier cleanup clears a pending timer and unsubscribes", () =
   assert.equal(listener, undefined);
 });
 
+test("completion notifier flush captured before cleanup becomes a shutdown no-op", () => {
+  const pi = new FakePi();
+  const timers = new FakeTimers();
+  let listener: ((jobs: readonly Job[]) => void) | undefined;
+  const manager = {
+    subscribe(next: (jobs: readonly Job[]) => void) {
+      listener = next;
+      next([{ id: "job-1", state: "running" } as Job]);
+      return () => { listener = undefined; };
+    },
+    get() { throw new Error("manager accessed after shutdown"); },
+  } as unknown as JobManager;
+  const cleanup = installCompletionNotifier(pi as never, manager, timers);
+
+  listener?.([{ id: "job-1", state: "completed" } as Job]);
+  const capturedFlush = timers.pending[0];
+  assert.ok(capturedFlush);
+  cleanup();
+
+  assert.doesNotThrow(() => capturedFlush());
+  assert.equal(pi.messages.length, 0);
+  assert.equal(listener, undefined);
+  assert.deepEqual(timers.delays, [100]);
+  assert.equal(timers.pending.length, 0);
+});
+
+test("completion notifier listener captured before cleanup becomes a shutdown no-op", () => {
+  const pi = new FakePi();
+  const timers = new FakeTimers();
+  let listener: ((jobs: readonly Job[]) => void) | undefined;
+  const manager = {
+    subscribe(next: (jobs: readonly Job[]) => void) {
+      listener = next;
+      next([{ id: "job-1", state: "running" } as Job]);
+      return () => { listener = undefined; };
+    },
+  } as unknown as JobManager;
+  const cleanup = installCompletionNotifier(pi as never, manager, timers);
+  const capturedListener = listener;
+  assert.ok(capturedListener);
+
+  cleanup();
+  capturedListener([{ id: "job-1", state: "completed" } as Job]);
+
+  assert.equal(pi.messages.length, 0);
+  assert.equal(listener, undefined);
+  assert.deepEqual(timers.delays, []);
+  assert.equal(timers.pending.length, 0);
+});
+
 test("runtime loads config only from Pi's agent directory, never the project config directory", async () => {
   const pi = new FakePi();
   const configPaths: string[] = [];
