@@ -95,25 +95,30 @@ export class SubagentsDashboard implements Component {
         } catch {
           this.actionFailed("cancel");
         }
+        return;
       } else if (selected && matchesKey(data, "x") && this.isInbox(selected)) {
         try {
+          const current = this.options.manager.list().find((job) => job.id === selected.id);
+          if (!current || !this.isInbox(current)) throw new Error("Job is no longer collectable");
           const formatted = formatCollectedResult(selected);
-          this.options.manager.collect(selected.id);
           this.options.pi.sendMessage({
             customType: "simple-subagents-result",
             content: formatted,
             display: true,
             details: { jobId: selected.id },
           }, { deliverAs: "nextTurn" });
+          this.options.manager.collect(selected.id);
         } catch {
           this.actionFailed("collect");
         }
+        return;
       } else if (selected && matchesKey(data, "d") && this.isInbox(selected)) {
         try {
           this.options.manager.discard(selected.id);
         } catch {
           this.actionFailed("discard");
         }
+        return;
       } else return;
     }
     this.changed();

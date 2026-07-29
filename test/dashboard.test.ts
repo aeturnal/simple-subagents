@@ -129,7 +129,11 @@ class FakePi {
   }
   registerCommand(name: string, options: { handler: (args: string, ctx: any) => Promise<void> }): void { this.commands.set(name, options.handler); }
   registerMessageRenderer(name: string, renderer: (message: any, options: any, theme: any) => { render(width: number): string[] }): void { this.renderers.set(name, renderer); }
-  sendMessage(message: any, options: any): void { this.messages.push({ message, options }); }
+  sendError: Error | undefined;
+  sendMessage(message: any, options: any): void {
+    if (this.sendError) throw this.sendError;
+    this.messages.push({ message, options });
+  }
   async emit(event: string, ctx: any): Promise<void> { for (const handler of this.handlers.get(event) ?? []) await handler({}, ctx); }
 }
 
@@ -339,6 +343,53 @@ test("dashboard contains rejected cancellation and refreshes stale collect and d
   view.dispose();
   collectView.dispose();
   discardView.dispose();
+});
+
+test("dashboard collection remains retryable after send failure", () => {
+  const pi = new FakePi();
+  const manager = new FakeManager([job("job-1", "completed")]);
+  const view = dashboard(manager, pi);
+  pi.sendError = new Error("delivery failed");
+
+  view.handleInput?.("x");
+
+  assert.equal(manager.jobs[0]?.state, "completed");
+  assert.deepEqual(manager.calls, []);
+  assert.equal(pi.messages.length, 0);
+  assert.deepEqual(pi.ui.notifications, [["Could not collect subagent job.", "error"]]);
+
+  pi.sendError = undefined;
+  view.handleInput?.("x");
+
+  assert.equal(manager.jobs[0]?.state, "collected");
+  assert.deepEqual(manager.calls, ["collect:job-1"]);
+  assert.equal(pi.messages.length, 1);
+  view.dispose();
+});
+
+test("successful dashboard actions request one render from the manager subscription", async () => {
+  for (const [state, key, call] of [
+    ["queued", "c", "cancel:job-1"],
+    ["completed", "x", "collect:job-1"],
+    ["completed", "d", "discard:job-1"],
+  ] as const) {
+    const pi = new FakePi();
+    const manager = new FakeManager([job("job-1", state)]);
+    registerSubagentsUi(pi as never, manager as never);
+    const command = pi.commands.get("subagents");
+    assert.ok(command);
+    const opening = command("", context(pi));
+    const view = pi.ui.component;
+    assert.ok(view);
+    const before = pi.ui.renderRequests;
+
+    view.handleInput?.(key);
+
+    assert.equal(pi.ui.renderRequests - before, 1, call);
+    assert.deepEqual(manager.calls, [call]);
+    view.handleInput?.("\x1b");
+    await opening;
+  }
 });
 
 test("dashboard ignores a rejected cancellation after it is closed", async () => {
