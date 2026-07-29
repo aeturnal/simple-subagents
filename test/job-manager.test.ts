@@ -47,6 +47,8 @@ interface StartedRun {
 
 class ControlledRunner implements ProcessRunner {
   readonly started: StartedRun[] = [];
+  onRun?: (options: ProcessRunOptions) => void;
+  throwNext?: Error;
 
   run(options: ProcessRunOptions): RunningProcess {
     let resolve!: (result: ProcessResult) => void;
@@ -62,6 +64,12 @@ class ControlledRunner implements ProcessRunner {
       rejectCancel = nextReject;
     });
     const started: StartedRun = { options, resolve, reject, cancelCalls: 0, releaseCancel, rejectCancel };
+    const error = this.throwNext;
+    this.throwNext = undefined;
+    if (error) throw error;
+    const onRun = this.onRun;
+    this.onRun = undefined;
+    onRun?.(options);
     this.started.push(started);
 
     return {
@@ -181,6 +189,90 @@ test("assigns stable increasing IDs and passes resolved process options", () => 
   assert.equal(runner.started[0]?.options.cwd, "/request");
   assert.equal(runner.started[0]?.options.parentModel, "parent-model");
   assert.equal(runner.started[0]?.options.thinkingLevel, "high");
+});
+
+test("counts a synchronous runner startup reservation before re-entrant enqueue", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner, concurrency: 1 });
+  runner.onRun = () => manager.enqueue(makeRequests(1), profiles, defaults);
+
+  manager.enqueue(makeRequests(1), profiles, defaults);
+
+  assert.equal(runner.started.length, 1);
+  assert.deepEqual(manager.list().map((job) => job.state), ["running", "queued"]);
+  runner.complete(0, successfulResult("first"));
+  await runner.flush();
+  assert.equal(runner.started.length, 2);
+});
+
+test("signals a process returned after synchronous runner cancellation and releases its slot on settlement", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner, concurrency: 1 });
+  let cancelling: Promise<Awaited<ReturnType<JobManager["cancel"]>>> | undefined;
+  runner.onRun = () => {
+    cancelling = manager.cancel("job-1");
+  };
+
+  const [first] = manager.enqueue(makeRequests(2), profiles, defaults);
+  assert.ok(first);
+
+  assert.equal(runner.started.length, 1);
+  assert.equal(runner.started[0]?.cancelCalls, 1);
+  assert.equal(manager.get(first.id)?.state, "running");
+  runner.releaseCancel(0);
+  assert.equal((await cancelling)?.state, "cancelled");
+  assert.equal(manager.get(first.id)?.state, "cancelled");
+  assert.equal(runner.started.length, 1);
+
+  runner.complete(0, successfulResult("late success"));
+  await runner.flush();
+  assert.equal(runner.started.length, 2);
+});
+
+test("shutdown from synchronous runner startup signals the returned process and waits for its result", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner, concurrency: 1 });
+  let stopping: Promise<void> | undefined;
+  runner.onRun = () => {
+    stopping = manager.shutdown();
+  };
+
+  const [active, queued] = manager.enqueue(makeRequests(2), profiles, defaults);
+  assert.ok(active && queued && stopping);
+  let shutdownFinished = false;
+  void stopping.then(() => {
+    shutdownFinished = true;
+  });
+  await runner.flush();
+
+  assert.equal(runner.started.length, 1);
+  assert.equal(runner.started[0]?.cancelCalls, 1);
+  assert.equal(shutdownFinished, false);
+  assert.equal(manager.get(queued.id)?.state, "cancelled");
+  runner.releaseCancel(0);
+  await runner.flush();
+  assert.equal(shutdownFinished, false);
+
+  runner.complete(0, successfulResult("late success"));
+  await stopping;
+  assert.equal(manager.get(active.id)?.state, "cancelled");
+  assert.equal(runner.started.length, 1);
+});
+
+test("releases a startup reservation when runner.run throws", async () => {
+  const runner = new ControlledRunner();
+  runner.throwNext = new Error("could not start");
+  const manager = new JobManager({ runner, concurrency: 1 });
+
+  const [failed] = manager.enqueue(makeRequests(2), profiles, defaults);
+  assert.ok(failed);
+  assert.equal(manager.get(failed.id)?.state, "failed");
+  assert.equal(runner.started.length, 1);
+
+  runner.complete(0, successfulResult("second"));
+  await runner.flush();
+  manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.equal(runner.started.length, 2);
 });
 
 test("does not publish running work before its process occupies a slot during subscriber enqueue", () => {

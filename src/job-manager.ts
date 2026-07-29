@@ -14,6 +14,13 @@ interface InternalJob {
   cancellation?: Promise<void>;
 }
 
+interface StartingRun {
+  settled: Promise<void>;
+  settle(): void;
+  cancellation?: Promise<void>;
+  resolveCancellation?: () => void;
+}
+
 export class JobManager {
   private readonly runner: ProcessRunner;
   private readonly concurrency: number;
@@ -21,6 +28,7 @@ export class JobManager {
   private readonly jobs = new Map<string, InternalJob>();
   private readonly queue: string[] = [];
   private readonly active = new Map<string, RunningProcess>();
+  private readonly starting = new Map<string, StartingRun>();
   private readonly subscribers = new Set<(jobs: readonly Job[]) => void>();
   private nextId = 1;
   private stopped = false;
@@ -102,8 +110,10 @@ export class JobManager {
       return this.snapshot(entry.job);
     }
 
+    const starting = this.starting.get(id);
     const process = this.active.get(id);
-    if (process) await this.cancelActive(entry, process);
+    if (starting) await this.startingCancellation(starting);
+    else if (process) await this.cancelActive(entry, process);
     else if (entry.job.state === "running") this.finish(entry, "cancelled");
     return this.snapshot(entry.job);
   }
@@ -151,9 +161,14 @@ export class JobManager {
     }
 
     const running = [...this.active.entries()];
+    const starting = [...this.starting.entries()];
     for (const [id] of running) this.requireJob(id).cancellationRequested = true;
-    this.shutdownPromise = Promise.allSettled(running.map(([id, process]) => this.cancelActive(this.requireJob(id), process)))
-      .then(() => Promise.allSettled(running.map(([, process]) => process.result)))
+    for (const [id] of starting) this.requireJob(id).cancellationRequested = true;
+    this.shutdownPromise = Promise.allSettled([
+      ...running.map(([id, process]) => this.cancelActive(this.requireJob(id), process)),
+      ...starting.map(([, reservation]) => this.startingCancellation(reservation)),
+    ])
+      .then(() => Promise.allSettled([...running.map(([, process]) => process.result), ...starting.map(([, reservation]) => reservation.settled)]))
       .then(() => undefined);
     return this.shutdownPromise;
   }
@@ -161,12 +176,26 @@ export class JobManager {
   private pump(): void {
     if (this.stopped) return;
 
-    while (this.active.size < this.concurrency) {
+    while (this.active.size + this.starting.size < this.concurrency) {
       const id = this.queue.shift();
       if (!id) return;
       const entry = this.jobs.get(id);
       if (!entry || entry.job.state !== "queued") continue;
 
+      let resolveSettled!: () => void;
+      let reservationSettled = false;
+      const reservation: StartingRun = {
+        settled: new Promise<void>((resolve) => {
+          resolveSettled = resolve;
+        }),
+        settle: () => {
+          if (!reservationSettled) {
+            reservationSettled = true;
+            resolveSettled();
+          }
+        },
+      };
+      this.starting.set(id, reservation);
       entry.job.state = "running";
       entry.job.startedAt = this.now();
       const synchronousProgress: ProgressItem[] = [];
@@ -186,22 +215,44 @@ export class JobManager {
           },
         });
       } catch (error) {
-        this.applyResult(entry, this.errorResult(error));
+        this.starting.delete(id);
+        this.applyResult(entry, this.errorResult(error), true);
+        reservation.resolveCancellation?.();
+        reservation.settle();
         continue;
       }
 
       this.active.set(id, process);
       registered = true;
       void process.result.then(
-        (result) => this.applyResult(entry, result),
-        (error: unknown) => this.applyResult(entry, this.errorResult(error)),
+        (result) => {
+          this.applyResult(entry, result);
+          reservation.settle();
+        },
+        (error: unknown) => {
+          this.applyResult(entry, this.errorResult(error));
+          reservation.settle();
+        },
       );
+      this.starting.delete(id);
+      if (entry.cancellationRequested) {
+        void this.cancelActive(entry, process).then(() => reservation.resolveCancellation?.());
+      }
       if (synchronousProgress.length === 0) {
         this.notify();
       } else {
         for (const item of synchronousProgress) this.addProgress(entry, item);
       }
     }
+  }
+
+  private startingCancellation(reservation: StartingRun): Promise<void> {
+    if (!reservation.cancellation) {
+      reservation.cancellation = new Promise<void>((resolve) => {
+        reservation.resolveCancellation = resolve;
+      });
+    }
+    return reservation.cancellation;
   }
 
   private cancelActive(entry: InternalJob, process: RunningProcess): Promise<void> {
@@ -227,7 +278,7 @@ export class JobManager {
     this.notify();
   }
 
-  private applyResult(entry: InternalJob, result: ProcessResult): void {
+  private applyResult(entry: InternalJob, result: ProcessResult, forceFailure = false): void {
     this.active.delete(entry.job.id);
     entry.job.output = result.output;
     entry.job.stderr = result.stderr || result.errorMessage || "";
@@ -237,7 +288,7 @@ export class JobManager {
     entry.job.malformedEventCount = result.malformedEventCount;
 
     if (entry.job.state === "running") {
-      this.finish(entry, entry.cancellationRequested ? "cancelled" : this.resultState(result));
+      this.finish(entry, forceFailure ? "failed" : entry.cancellationRequested ? "cancelled" : this.resultState(result));
     } else {
       this.notify();
       this.pump();
