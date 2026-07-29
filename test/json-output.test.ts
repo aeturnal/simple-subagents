@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { JsonLineParser } from "../src/json-stream.ts";
-import { formatCollectedResult, truncateUtf8 } from "../src/output.ts";
+import { COLLECTED_OUTPUT_MAX_BYTES, formatCollectedResult, truncateUtf8 } from "../src/output.ts";
 import type { Job } from "../src/types.ts";
 
 const job = (overrides: Partial<Job> = {}): Job => ({
@@ -70,6 +70,15 @@ test("truncates without splitting UTF-8 characters", () => {
   assert.deepEqual(result.truncation, { originalBytes: 6, keptBytes: 5 });
 });
 
+test("backs up from incomplete UTF-8 prefixes", () => {
+  for (const maxBytes of [2, 3, 4]) {
+    assert.deepEqual(truncateUtf8("a😀b", maxBytes), {
+      text: "a",
+      truncation: { originalBytes: 6, keptBytes: 1 },
+    });
+  }
+});
+
 test("does not add truncation metadata when text fits", () => {
   const result = truncateUtf8("a😀b", 6);
 
@@ -93,6 +102,41 @@ test("formats failed results with output, stderr, and truncation diagnostics", (
         truncation: { originalBytes: 60000, keptBytes: 51200 },
       }),
     ),
-    "# Subagent result: job-42\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n\n## Result\n\nPartial answer\n\n## Diagnostics\n\nOutput:\nPartial answer\n\nStderr:\nprocess exited 1\n\nOutput truncated: retained 51200 of 60000 bytes.",
+    "# Subagent result: job-42\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n\n## Diagnostics\n\nOutput:\nPartial answer\n\nStderr:\nprocess exited 1\n\nOutput truncated: retained 51200 of 60000 bytes.",
   );
+});
+
+test("caps completed results at the complete model-visible byte limit", () => {
+  const formatted = formatCollectedResult(job({ output: "😀".repeat(20_000) }));
+
+  assert.ok(Buffer.byteLength(formatted) <= COLLECTED_OUTPUT_MAX_BYTES);
+  assert.ok(!formatted.includes("\uFFFD"));
+});
+
+test("caps failed diagnostics without duplicating output and merges truncation counts", () => {
+  const formatted = formatCollectedResult(
+    job({
+      state: "failed",
+      output: "😀".repeat(15_000),
+      stderr: "😀".repeat(15_000),
+      truncation: { originalBytes: 100_000, keptBytes: 60_000 },
+    }),
+  );
+  const notice = /\n\nOutput truncated: retained (\d+) of (\d+) bytes\.$/.exec(formatted);
+
+  assert.ok(Buffer.byteLength(formatted) <= COLLECTED_OUTPUT_MAX_BYTES);
+  assert.equal(formatted.split("Output:\n").length - 1, 1);
+  assert.ok(!formatted.includes("\uFFFD"));
+  assert.ok(notice);
+  assert.equal(notice[2], "100000");
+  assert.equal(notice[1], String(Buffer.byteLength(formatted.slice(0, notice.index))));
+});
+
+test("caps cancelled results with large multibyte stderr", () => {
+  const formatted = formatCollectedResult(
+    job({ state: "cancelled", output: "partial", stderr: "😀".repeat(20_000) }),
+  );
+
+  assert.ok(Buffer.byteLength(formatted) <= COLLECTED_OUTPUT_MAX_BYTES);
+  assert.ok(!formatted.includes("\uFFFD"));
 });
