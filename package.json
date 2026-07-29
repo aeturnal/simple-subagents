@@ -1,0 +1,32 @@
+{
+  "name": "simple-subagents",
+  "version": "0.1.0",
+  "description": "Lightweight background subagents for Pi",
+  "type": "module",
+  "keywords": ["pi-package", "pi", "subagents"],
+  "license": "MIT",
+  "files": ["src", "README.md"],
+  "pi": { "extensions": ["./src/index.ts"] },
+  "scripts": {
+    "test": "tsx --test test/*.test.ts",
+    "test:unit": "tsx --test test/config-agents.test.ts test/json-output.test.ts test/process-runner.test.ts test/job-manager.test.ts test/tools.test.ts test/dashboard.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typebox": "*",
+    "typescript": "^5.9.0"
+  }
+}
