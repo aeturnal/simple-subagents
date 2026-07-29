@@ -6,8 +6,16 @@ Requires Node.js 22.19 or newer and Pi 0.82.x.
 
 ## Use locally
 
+Install the package persistently, then start Pi normally:
+
 ```sh
 pi install .
+pi
+```
+
+Or load the extension for a single run without installing it:
+
+```sh
 pi -e ./src/index.ts
 ```
 
