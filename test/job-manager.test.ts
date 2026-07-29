@@ -621,6 +621,8 @@ test("signal resolves before result keeps cancelled active work occupying capaci
   runner.complete(0, failedResult());
   await runner.flush();
   assert.equal(runner.started.length, 2);
+  runner.complete(1, successfulResult("queued success"));
+  await runner.flush();
 });
 
 test("result rejects during cancellation keeps explicit cancellation terminal for concurrent callers", async () => {
@@ -698,16 +700,19 @@ test("cancel and shutdown overlap without releasing capacity or duplicating canc
   assert.equal(manager.get(queued.id)?.state, "cancelled");
   assert.equal(runner.started.length, 1);
 
-  runner.complete(0, successfulResult("late success"));
+  runner.releaseCancel(0);
+  const cancelled = await cancelling;
   await runner.flush();
-  assert.equal(cancellationSettled, false);
+  assert.equal(cancelled.state, "cancelled");
+  assert.equal(cancellationSettled, true);
   assert.equal(shutdownSettled, false);
   assert.equal(manager.get(active.id)?.state, "cancelled");
+  assert.equal(manager.get(queued.id)?.state, "cancelled");
   assert.equal(runner.started.length, 1);
 
-  runner.releaseCancel(0);
-  await Promise.all([cancelling, stopping]);
-  assert.equal(cancellationSettled, true);
+  runner.complete(0, successfulResult("late success"));
+  await stopping;
+  await runner.flush();
   assert.equal(shutdownSettled, true);
   assert.equal(manager.get(active.id)?.state, "cancelled");
   assert.equal(manager.get(queued.id)?.state, "cancelled");
