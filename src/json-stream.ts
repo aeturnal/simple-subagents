@@ -28,15 +28,13 @@ export class JsonLineParser {
     const pending = finished ? "" : records.pop() ?? "";
     this.pending = pending;
     const oversizedPending = !finished && Buffer.byteLength(pending, "utf8") > CAPTURED_TEXT_MAX_BYTES;
-    if (oversizedPending) {
-      this.pending = "";
-      this.decoder = new StringDecoder("utf8");
-    }
+    const results = records.flatMap((record) => this.parse(record));
+    if (!oversizedPending) return results;
 
-    return [
-      ...records.flatMap((record) => this.parse(record)),
-      ...(oversizedPending ? this.malformed(pending) : []),
-    ];
+    const oversizedMalformed = this.malformed(pending);
+    this.pending = "";
+    this.decoder = new StringDecoder("utf8");
+    return [...results, ...oversizedMalformed];
   }
 
   private parse(record: string): unknown[] {
