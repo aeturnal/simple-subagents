@@ -589,6 +589,131 @@ test("keeps explicit cancellation terminal when process completion races it", as
   assert.equal(manager.get(job.id)?.output, "late success");
 });
 
+test("signal resolves before result keeps cancelled active work occupying capacity", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner, concurrency: 1 });
+  const [active, queued] = manager.enqueue(makeRequests(2), profiles, defaults);
+  assert.ok(active && queued);
+
+  const cancelling = manager.cancel(active.id);
+  let cancellationSettled = false;
+  void cancelling.then(
+    () => {
+      cancellationSettled = true;
+    },
+    () => {
+      cancellationSettled = true;
+    },
+  );
+  await runner.flush();
+  assert.equal(cancellationSettled, false);
+  assert.equal(runner.started[0]?.cancelCalls, 1);
+  assert.equal(runner.started.length, 1);
+  assert.equal(manager.get(queued.id)?.state, "queued");
+
+  runner.releaseCancel(0);
+  const cancelled = await cancelling;
+  assert.equal(cancelled.state, "cancelled");
+  assert.equal(manager.get(active.id)?.state, "cancelled");
+  assert.equal(runner.started.length, 1);
+  assert.equal(manager.get(queued.id)?.state, "queued");
+
+  runner.complete(0, failedResult());
+  await runner.flush();
+  assert.equal(runner.started.length, 2);
+});
+
+test("result rejects during cancellation keeps explicit cancellation terminal for concurrent callers", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  const [job] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.ok(job);
+
+  const first = manager.cancel(job.id);
+  const second = manager.cancel(job.id);
+  let firstSettled = false;
+  let secondSettled = false;
+  void first.then(
+    () => {
+      firstSettled = true;
+    },
+    () => {
+      firstSettled = true;
+    },
+  );
+  void second.then(
+    () => {
+      secondSettled = true;
+    },
+    () => {
+      secondSettled = true;
+    },
+  );
+  assert.equal(runner.started[0]?.cancelCalls, 1);
+
+  runner.fail(0, new Error("result failed"));
+  await runner.flush();
+  assert.equal(firstSettled, false);
+  assert.equal(secondSettled, false);
+  assert.equal(manager.get(job.id)?.state, "cancelled");
+
+  runner.releaseCancel(0);
+  await assert.doesNotReject(Promise.all([first, second]));
+  const [firstCancelled, secondCancelled] = await Promise.all([first, second]);
+  assert.equal(firstCancelled.state, "cancelled");
+  assert.equal(secondCancelled.state, "cancelled");
+  assert.equal(manager.get(job.id)?.state, "cancelled");
+});
+
+test("cancel and shutdown overlap without releasing capacity or duplicating cancellation", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner, concurrency: 1 });
+  const [active, queued] = manager.enqueue(makeRequests(2), profiles, defaults);
+  assert.ok(active && queued);
+
+  const cancelling = manager.cancel(active.id);
+  const stopping = manager.shutdown();
+  let cancellationSettled = false;
+  let shutdownSettled = false;
+  void cancelling.then(
+    () => {
+      cancellationSettled = true;
+    },
+    () => {
+      cancellationSettled = true;
+    },
+  );
+  void stopping.then(
+    () => {
+      shutdownSettled = true;
+    },
+    () => {
+      shutdownSettled = true;
+    },
+  );
+  await runner.flush();
+  assert.equal(cancellationSettled, false);
+  assert.equal(shutdownSettled, false);
+  assert.equal(runner.started[0]?.cancelCalls, 1);
+  assert.equal(manager.get(queued.id)?.state, "cancelled");
+  assert.equal(runner.started.length, 1);
+
+  runner.complete(0, successfulResult("late success"));
+  await runner.flush();
+  assert.equal(cancellationSettled, false);
+  assert.equal(shutdownSettled, false);
+  assert.equal(manager.get(active.id)?.state, "cancelled");
+  assert.equal(runner.started.length, 1);
+
+  runner.releaseCancel(0);
+  await Promise.all([cancelling, stopping]);
+  assert.equal(cancellationSettled, true);
+  assert.equal(shutdownSettled, true);
+  assert.equal(manager.get(active.id)?.state, "cancelled");
+  assert.equal(manager.get(queued.id)?.state, "cancelled");
+  assert.equal(runner.started.length, 1);
+});
+
 test("treats repeated collect and discard as idempotent while rejecting cross-transitions", async () => {
   const runner = new ControlledRunner();
   const manager = new JobManager({ runner, concurrency: 2 });
