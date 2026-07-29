@@ -42,6 +42,7 @@ interface StartedRun {
   reject(error: Error): void;
   cancelCalls: number;
   releaseCancel(): void;
+  rejectCancel(error: Error): void;
 }
 
 class ControlledRunner implements ProcessRunner {
@@ -51,14 +52,16 @@ class ControlledRunner implements ProcessRunner {
     let resolve!: (result: ProcessResult) => void;
     let reject!: (error: Error) => void;
     let releaseCancel!: () => void;
+    let rejectCancel!: (error: Error) => void;
     const result = new Promise<ProcessResult>((nextResolve, nextReject) => {
       resolve = nextResolve;
       reject = nextReject;
     });
-    const cancelGate = new Promise<void>((nextResolve) => {
+    const cancelGate = new Promise<void>((nextResolve, nextReject) => {
       releaseCancel = nextResolve;
+      rejectCancel = nextReject;
     });
-    const started: StartedRun = { options, resolve, reject, cancelCalls: 0, releaseCancel };
+    const started: StartedRun = { options, resolve, reject, cancelCalls: 0, releaseCancel, rejectCancel };
     this.started.push(started);
 
     return {
@@ -86,9 +89,26 @@ class ControlledRunner implements ProcessRunner {
     this.started[index]?.releaseCancel();
   }
 
+  rejectCancel(index: number, error: Error): void {
+    this.started[index]?.rejectCancel(error);
+  }
+
   async flush(): Promise<void> {
     await new Promise<void>((resolve) => setImmediate(resolve));
     await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
+class SynchronousProgressRunner extends ControlledRunner {
+  run(options: ProcessRunOptions): RunningProcess {
+    options.onProgress({ type: "tool", text: "synchronous", timestamp: 1 });
+    return super.run(options);
+  }
+}
+
+class ThrowingRunner implements ProcessRunner {
+  run(_options: ProcessRunOptions): RunningProcess {
+    throw new Error("could not start");
   }
 }
 
@@ -116,6 +136,13 @@ test("uses the supplied concurrency limit", () => {
 
   assert.equal(runner.started.length, 2);
   assert.equal(manager.get("job-3")?.state, "queued");
+});
+
+test("rejects concurrency outside the absolute range of one through four", () => {
+  const runner = new ControlledRunner();
+
+  assert.throws(() => new JobManager({ runner, concurrency: 0 }), /concurrency/i);
+  assert.throws(() => new JobManager({ runner, concurrency: 5 }), /concurrency/i);
 });
 
 test("rejects an empty batch before adding jobs", () => {
@@ -154,6 +181,75 @@ test("assigns stable increasing IDs and passes resolved process options", () => 
   assert.equal(runner.started[0]?.options.cwd, "/request");
   assert.equal(runner.started[0]?.options.parentModel, "parent-model");
   assert.equal(runner.started[0]?.options.thinkingLevel, "high");
+});
+
+test("does not publish running work before its process occupies a slot during subscriber enqueue", () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner, concurrency: 1 });
+  let reentered = false;
+
+  manager.subscribe((jobs) => {
+    if (!reentered && jobs[0]?.state === "running") {
+      reentered = true;
+      manager.enqueue(makeRequests(1), profiles, defaults);
+    }
+  });
+  manager.enqueue(makeRequests(1), profiles, defaults);
+
+  assert.equal(runner.started.length, 1);
+  assert.deepEqual(manager.list().map((job) => job.state), ["running", "queued"]);
+});
+
+test("routes a re-entrant cancellation to a registered running process", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  let cancellation: Promise<ReturnType<JobManager["get"]>> | undefined;
+
+  manager.subscribe((jobs) => {
+    if (!cancellation && jobs[0]?.state === "running") cancellation = manager.cancel(jobs[0].id);
+  });
+  manager.enqueue(makeRequests(1), profiles, defaults);
+  await runner.flush();
+
+  assert.equal(runner.started.length, 1);
+  assert.equal(runner.started[0]?.cancelCalls, 1);
+  runner.releaseCancel(0);
+  assert.equal((await cancellation)?.state, "cancelled");
+});
+
+test("waits for a re-entrant shutdown to cancel the registered running process", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  let stopping: Promise<void> | undefined;
+
+  manager.subscribe((jobs) => {
+    if (!stopping && jobs[0]?.state === "running") stopping = manager.shutdown();
+  });
+  manager.enqueue(makeRequests(1), profiles, defaults);
+  await runner.flush();
+
+  assert.equal(runner.started.length, 1);
+  assert.equal(runner.started[0]?.cancelCalls, 1);
+  runner.releaseCancel(0);
+  runner.complete(0, successfulResult("late success"));
+  await stopping;
+  assert.equal(manager.get("job-1")?.state, "cancelled");
+});
+
+test("buffers synchronous progress until a running process is registered", async () => {
+  const runner = new SynchronousProgressRunner();
+  const manager = new JobManager({ runner });
+  let cancellation: Promise<ReturnType<JobManager["get"]>> | undefined;
+
+  manager.subscribe((jobs) => {
+    if (!cancellation && jobs[0]?.progress.length) cancellation = manager.cancel(jobs[0].id);
+  });
+  manager.enqueue(makeRequests(1), profiles, defaults);
+  await runner.flush();
+
+  assert.equal(runner.started[0]?.cancelCalls, 1);
+  runner.releaseCancel(0);
+  assert.equal((await cancellation)?.state, "cancelled");
 });
 
 test("returns immutable public snapshots", () => {
@@ -200,6 +296,34 @@ test("notifies subscribers of changes and stops after unsubscription", async () 
   await runner.flush();
 
   assert.deepEqual(updates, [[], ["queued"], ["running"], ["running"]]);
+});
+
+test("gives each subscriber an independent job snapshot", () => {
+  const manager = new JobManager({ runner: new ControlledRunner() });
+  const observedTasks: string[] = [];
+
+  manager.subscribe((jobs) => {
+    if (jobs[0]) jobs[0].request.task = "mutated by another listener";
+  });
+  manager.subscribe((jobs) => observedTasks.push(jobs[0]?.request.task ?? "empty"));
+  manager.enqueue(makeRequests(1), profiles, defaults);
+
+  assert.equal(observedTasks.at(-1), "Task 1");
+});
+
+test("continues notifying and pumping when a subscriber throws", () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  const observedStates: string[][] = [];
+
+  assert.doesNotThrow(() => manager.subscribe(() => {
+    throw new Error("listener failed");
+  }));
+  manager.subscribe((jobs) => observedStates.push(jobs.map((job) => job.state)));
+
+  assert.doesNotThrow(() => manager.enqueue(makeRequests(1), profiles, defaults));
+  assert.equal(runner.started.length, 1);
+  assert.deepEqual(observedStates.at(-1), ["running"]);
 });
 
 test("maps process results to completed and failed states", async () => {
@@ -262,6 +386,27 @@ test("shares a running cancellation operation between concurrent callers", async
   assert.equal(secondCancelled.state, "cancelled");
 });
 
+test("returns a cancelled snapshot when process cancellation rejects but keeps its slot until settlement", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner, concurrency: 1 });
+  const [first] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.ok(first);
+
+  const cancelling = manager.cancel(first.id);
+  runner.rejectCancel(0, new Error("signal failed"));
+  await assert.doesNotReject(cancelling);
+  const cancelled = await cancelling;
+  const [queued] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.ok(queued);
+
+  assert.equal(cancelled.state, "cancelled");
+  assert.equal(manager.get(queued.id)?.state, "queued");
+  assert.equal(runner.started.length, 1);
+  runner.complete(0, successfulResult("late success"));
+  await runner.flush();
+  assert.equal(runner.started.length, 2);
+});
+
 test("keeps explicit cancellation terminal when process completion races it", async () => {
   const runner = new ControlledRunner();
   const manager = new JobManager({ runner });
@@ -278,6 +423,23 @@ test("keeps explicit cancellation terminal when process completion races it", as
   assert.equal(cancelled.state, "cancelled");
   assert.equal(manager.get(job.id)?.state, "cancelled");
   assert.equal(manager.get(job.id)?.output, "late success");
+});
+
+test("treats repeated collect and discard as idempotent while rejecting cross-transitions", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner, concurrency: 2 });
+  const [completed, discarded] = manager.enqueue(makeRequests(2), profiles, defaults);
+  assert.ok(completed && discarded);
+  runner.complete(0, successfulResult("done"));
+  runner.complete(1, successfulResult("next"));
+  await runner.flush();
+
+  assert.equal(manager.collect(completed.id).state, "collected");
+  assert.equal(manager.collect(completed.id).state, "collected");
+  assert.equal(manager.discard(discarded.id).state, "discarded");
+  assert.equal(manager.discard(discarded.id).state, "discarded");
+  assert.throws(() => manager.discard(completed.id), /cannot discard/i);
+  assert.throws(() => manager.collect(discarded.id), /cannot collect/i);
 });
 
 test("collects only settled inbox jobs and discards only settled inbox jobs", async () => {
@@ -297,6 +459,15 @@ test("collects only settled inbox jobs and discards only settled inbox jobs", as
   assert.equal(manager.discard(queued.id).state, "discarded");
   assert.throws(() => manager.discard(running.id), /cannot discard/i);
   assert.throws(() => manager.collect(queued.id), /cannot collect/i);
+});
+
+test("marks a synchronously throwing runner invocation as failed", () => {
+  const manager = new JobManager({ runner: new ThrowingRunner() });
+  const [job] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.ok(job);
+
+  assert.equal(manager.get(job.id)?.state, "failed");
+  assert.equal(manager.get(job.id)?.stderr, "could not start");
 });
 
 test("shutdown cancels queued and active work then waits for active settlement", async () => {

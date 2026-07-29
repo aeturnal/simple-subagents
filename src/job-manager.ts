@@ -1,6 +1,7 @@
 import type { ProcessResult, ProcessRunner, RunningProcess } from "./process-runner.js";
 import type { AgentProfile, Job, JobRequest, JobState, ProgressItem, UsageStats } from "./types.js";
 
+const MAX_CONCURRENCY = 4;
 const MAX_BATCH_SIZE = 8;
 const MAX_PROGRESS_ITEMS = 200;
 
@@ -26,12 +27,13 @@ export class JobManager {
   private shutdownPromise?: Promise<void>;
 
   constructor(options: { runner: ProcessRunner; concurrency?: number; now?: () => number }) {
-    if (!Number.isInteger(options.concurrency ?? 4) || (options.concurrency ?? 4) < 1) {
-      throw new Error("Concurrency must be a positive integer");
+    const concurrency = options.concurrency ?? MAX_CONCURRENCY;
+    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > MAX_CONCURRENCY) {
+      throw new Error("Concurrency must be an integer between 1 and 4");
     }
 
     this.runner = options.runner;
-    this.concurrency = options.concurrency ?? 4;
+    this.concurrency = concurrency;
     this.now = options.now ?? Date.now;
   }
 
@@ -108,6 +110,7 @@ export class JobManager {
 
   collect(id: string): Job {
     const entry = this.requireJob(id);
+    if (entry.job.state === "collected") return this.snapshot(entry.job);
     if (!this.isInboxState(entry.job.state)) throw new Error(`Cannot collect job in ${entry.job.state} state`);
 
     entry.job.state = "collected";
@@ -117,6 +120,7 @@ export class JobManager {
 
   discard(id: string): Job {
     const entry = this.requireJob(id);
+    if (entry.job.state === "discarded") return this.snapshot(entry.job);
     if (!this.isInboxState(entry.job.state)) throw new Error(`Cannot discard job in ${entry.job.state} state`);
 
     entry.job.state = "discarded";
@@ -126,7 +130,11 @@ export class JobManager {
 
   subscribe(listener: (jobs: readonly Job[]) => void): () => void {
     this.subscribers.add(listener);
-    listener(this.list());
+    try {
+      listener(this.list());
+    } catch {
+      // A listener cannot disrupt the manager.
+    }
     return () => this.subscribers.delete(listener);
   }
 
@@ -161,7 +169,8 @@ export class JobManager {
 
       entry.job.state = "running";
       entry.job.startedAt = this.now();
-      this.notify();
+      const synchronousProgress: ProgressItem[] = [];
+      let registered = false;
 
       let process: RunningProcess;
       try {
@@ -171,7 +180,10 @@ export class JobManager {
           profile: structuredClone(entry.job.profile),
           parentModel: entry.defaults.parentModel,
           thinkingLevel: entry.defaults.thinkingLevel,
-          onProgress: (item) => this.addProgress(entry, item),
+          onProgress: (item) => {
+            if (registered) this.addProgress(entry, item);
+            else synchronousProgress.push(structuredClone(item));
+          },
         });
       } catch (error) {
         this.applyResult(entry, this.errorResult(error));
@@ -179,10 +191,16 @@ export class JobManager {
       }
 
       this.active.set(id, process);
+      registered = true;
       void process.result.then(
         (result) => this.applyResult(entry, result),
         (error: unknown) => this.applyResult(entry, this.errorResult(error)),
       );
+      if (synchronousProgress.length === 0) {
+        this.notify();
+      } else {
+        for (const item of synchronousProgress) this.addProgress(entry, item);
+      }
     }
   }
 
@@ -192,10 +210,10 @@ export class JobManager {
     let cancellation: Promise<void>;
     try {
       cancellation = process.cancel();
-    } catch (error) {
-      cancellation = Promise.reject(error);
+    } catch {
+      cancellation = Promise.resolve();
     }
-    entry.cancellation = cancellation.finally(() => {
+    entry.cancellation = cancellation.catch(() => undefined).then(() => {
       if (entry.job.state === "running") this.finish(entry, "cancelled");
     });
     return entry.cancellation;
@@ -264,8 +282,13 @@ export class JobManager {
   }
 
   private notify(): void {
-    const jobs = this.list();
-    for (const listener of this.subscribers) listener(jobs);
+    for (const listener of this.subscribers) {
+      try {
+        listener(this.list());
+      } catch {
+        // A listener cannot disrupt the manager or later listeners.
+      }
+    }
   }
 
   private snapshot(job: Job): Job {
