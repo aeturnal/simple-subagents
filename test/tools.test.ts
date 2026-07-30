@@ -185,14 +185,26 @@ test("startJobs fails closed for an invalid writable confirmation outcome", asyn
   assert.equal(runner.started.length, 0);
 });
 
-test("startJobs returns an ordinary diagnostic for an unknown profile", async () => {
-  const { services } = createServices();
+test("startJobs lists available profiles for an unknown profile without enqueueing", async () => {
+  const { services, runner } = createServices();
 
   const result = await startJobs({ tasks: [{ task: "inspect", agent: "missing" }] }, services, {} as never);
 
-  assert.match(text(result), /Unknown agent profile: missing/);
+  const expected = "Unknown agent profile: missing. Available profiles: generic, reviewer.";
+  assert.equal(text(result), expected);
+  assert.deepEqual(result.details.diagnostics, [expected]);
   assert.deepEqual(result.details.jobs, []);
-  assert.deepEqual(result.details.diagnostics, ["Unknown agent profile: missing"]);
+  assert.equal(runner.started.length, 0);
+});
+
+test("startJobs sanitizes line breaks in unknown profile diagnostics", async () => {
+  const { services, runner } = createServices();
+
+  const result = await startJobs({ tasks: [{ task: "inspect", agent: "bad\nname" }] }, services, {} as never);
+
+  assert.doesNotMatch(text(result), /\n/);
+  assert.doesNotMatch(result.details.diagnostics[0] ?? "", /\n/);
+  assert.equal(runner.started.length, 0);
 });
 
 test("statusJobs lists all jobs and can inspect one job", async () => {

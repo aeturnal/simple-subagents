@@ -4,7 +4,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { JobManager, type WaitJobStatus, type WaitResult, type WaitUntil } from "./job-manager.js";
 import { capCollectedPayload, formatCollectedResult } from "./output.js";
-import { buildPublicAgentDiscovery, type PublicAgentProfile } from "./profile-discovery.js";
+import { buildPublicAgentDiscovery, formatUnknownProfileDiagnostic, type PublicAgentProfile } from "./profile-discovery.js";
 import type { AgentProfile, Job, JobRequest } from "./types.js";
 
 const StartTask = Type.Object({
@@ -108,7 +108,7 @@ export async function startJobs(input: StartInput, services: ToolServices, ctx: 
   const profiles = await services.getProfiles();
   const unknown = requests.find((request) => !profiles.has(request.agent));
   if (unknown) {
-    const diagnostic = `Unknown agent profile: ${unknown.agent}`;
+    const diagnostic = formatUnknownProfileDiagnostic(unknown.agent, [...profiles.values()]);
     return response(diagnostic, [], [diagnostic], "start");
   }
   const writable = requests.filter((request) => request.writeAccess);
