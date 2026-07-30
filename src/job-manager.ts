@@ -206,17 +206,28 @@ export class JobManager {
 
     return new Promise<WaitResult>((resolve) => {
       let settled = false;
+      let timer: unknown;
       let unsubscribe: (() => void) | undefined;
+      let settle!: (outcome: WaitOutcome) => void;
+      const onAbort = () => settle("aborted");
 
-      const settleCompleted = () => {
+      const cleanup = () => {
+        unsubscribe?.();
+        unsubscribe = undefined;
+        if (timer !== undefined) this.clearTimer(timer);
+        timer = undefined;
+        options.signal?.removeEventListener("abort", onAbort);
+      };
+
+      settle = (outcome) => {
         if (settled) return;
         const current = this.waitSnapshots(options.ids);
-        if (!this.waitSatisfied(current, options.until)) return;
+        if (outcome === "completed" && !this.waitSatisfied(current, options.until)) return;
         settled = true;
-        unsubscribe?.();
+        cleanup();
         resolve({
           operation: "wait",
-          outcome: "completed",
+          outcome,
           until: options.until,
           timeoutMs: options.timeoutMs,
           elapsedMs: this.now() - startedAt,
@@ -224,8 +235,19 @@ export class JobManager {
         });
       };
 
-      unsubscribe = this.subscribe(settleCompleted);
-      if (settled) unsubscribe();
+      unsubscribe = this.subscribe(() => settle("completed"));
+      if (settled) {
+        unsubscribe();
+        return;
+      }
+      if (options.signal?.aborted) {
+        settle("aborted");
+        return;
+      }
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+      if (settled) return;
+      timer = this.setTimer(() => settle("timed_out"), options.timeoutMs);
+      if (settled && timer !== undefined) this.clearTimer(timer);
     });
   }
 

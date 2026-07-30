@@ -107,6 +107,55 @@ class ControlledRunner implements ProcessRunner {
   }
 }
 
+class WaitClock {
+  now = 0;
+  nextId = 1;
+  readonly timers = new Map<number, { callback: () => void; delay: number }>();
+  readonly cleared: number[] = [];
+
+  setTimer = (callback: () => void, delay: number): number => {
+    const id = this.nextId++;
+    this.timers.set(id, { callback, delay });
+    return id;
+  };
+
+  clearTimer = (timer: unknown): void => {
+    const id = timer as number;
+    this.cleared.push(id);
+    this.timers.delete(id);
+  };
+
+  fire(id = this.timers.keys().next().value as number): void {
+    const timer = this.timers.get(id);
+    assert.ok(timer);
+    this.timers.delete(id);
+    this.now += timer.delay;
+    timer.callback();
+  }
+}
+
+class TrackedAbortSignal extends EventTarget {
+  aborted = false;
+  addCalls = 0;
+  removeCalls = 0;
+
+  override addEventListener(type: string, listener: EventListenerOrEventListenerObject | null, options?: AddEventListenerOptions | boolean): void {
+    this.addCalls += 1;
+    super.addEventListener(type, listener, options);
+  }
+
+  override removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null, options?: EventListenerOptions | boolean): void {
+    this.removeCalls += 1;
+    super.removeEventListener(type, listener, options);
+  }
+
+  abort(): void {
+    if (this.aborted) return;
+    this.aborted = true;
+    this.dispatchEvent(new Event("abort"));
+  }
+}
+
 class SynchronousProgressRunner extends ControlledRunner {
   run(options: ProcessRunOptions): RunningProcess {
     options.onProgress({ type: "tool", text: "synchronous", timestamp: 1 });
@@ -923,4 +972,144 @@ test("waitFor treats cancelled, collected, and discarded jobs as settled", async
     { id: collected.id, state: "collected" },
     { id: discarded.id, state: "discarded" },
   ]);
+});
+
+test("waitFor times out normally with current states and no job mutation", async () => {
+  const clock = new WaitClock();
+  const runner = new ControlledRunner();
+  const manager = new JobManager({
+    runner,
+    now: () => clock.now,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+  const [job] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.ok(job);
+  const before = manager.get(job.id);
+
+  const waiting = manager.waitFor({ ids: [job.id], until: "all", timeoutMs: 15_000 });
+  assert.deepEqual([...clock.timers.values()].map(({ delay }) => delay), [15_000]);
+  clock.fire();
+  const result = await waiting;
+
+  assert.deepEqual(result, {
+    operation: "wait",
+    outcome: "timed_out",
+    until: "all",
+    timeoutMs: 15_000,
+    elapsedMs: 15_000,
+    jobs: [{ id: job.id, state: "running" }],
+  });
+  assert.equal(manager.get(job.id)?.state, before?.state);
+  assert.equal(runner.started[0]?.cancelCalls, 0);
+  assert.equal(clock.timers.size, 0);
+});
+
+test("waitFor installs the configured minimum and maximum timeout delays", async () => {
+  const clock = new WaitClock();
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner, setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+  const [job] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.ok(job);
+  const minimumAbort = new AbortController();
+  const maximumAbort = new AbortController();
+
+  const minimum = manager.waitFor({ ids: [job.id], until: "all", timeoutMs: 100, signal: minimumAbort.signal });
+  const maximum = manager.waitFor({ ids: [job.id], until: "all", timeoutMs: 30_000, signal: maximumAbort.signal });
+  assert.deepEqual([...clock.timers.values()].map(({ delay }) => delay), [100, 30_000]);
+
+  minimumAbort.abort();
+  maximumAbort.abort();
+  assert.deepEqual((await Promise.all([minimum, maximum])).map(({ outcome }) => outcome), ["aborted", "aborted"]);
+  assert.equal(clock.timers.size, 0);
+});
+
+test("waitFor aborts with current states and removes timer and abort listener", async () => {
+  const clock = new WaitClock();
+  const signal = new TrackedAbortSignal();
+  const runner = new ControlledRunner();
+  const manager = new JobManager({
+    runner,
+    now: () => clock.now,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+  const [job] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.ok(job);
+  let activeSubscriptions = 0;
+  const subscribe = manager.subscribe.bind(manager);
+  manager.subscribe = (listener) => {
+    activeSubscriptions += 1;
+    const unsubscribe = subscribe(listener);
+    let removed = false;
+    return () => {
+      if (removed) return;
+      removed = true;
+      activeSubscriptions -= 1;
+      unsubscribe();
+    };
+  };
+
+  const waiting = manager.waitFor({
+    ids: [job.id],
+    until: "all",
+    timeoutMs: 30_000,
+    signal: signal as unknown as AbortSignal,
+  });
+  clock.now = 25;
+  signal.abort();
+  const result = await waiting;
+
+  assert.equal(result.outcome, "aborted");
+  assert.equal(result.elapsedMs, 25);
+  assert.deepEqual(result.jobs, [{ id: job.id, state: "running" }]);
+  assert.equal(signal.addCalls, 1);
+  assert.equal(signal.removeCalls, 1);
+  assert.deepEqual(clock.cleared, [1]);
+  assert.equal(clock.timers.size, 0);
+  assert.equal(activeSubscriptions, 0);
+  assert.equal(runner.started[0]?.cancelCalls, 0);
+});
+
+test("waitFor completion wins once against later timeout and abort callbacks", async () => {
+  const clock = new WaitClock();
+  const signal = new TrackedAbortSignal();
+  const runner = new ControlledRunner();
+  const manager = new JobManager({
+    runner,
+    now: () => clock.now,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+  const [job] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.ok(job);
+  const waiting = manager.waitFor({ ids: [job.id], until: "all", timeoutMs: 100, signal: signal as unknown as AbortSignal });
+  const timeoutCallback = [...clock.timers.values()][0]?.callback;
+  assert.ok(timeoutCallback);
+
+  runner.complete(0, successfulResult("done"));
+  await runner.flush();
+  const result = await waiting;
+  signal.abort();
+  timeoutCallback();
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(signal.removeCalls, 1);
+  assert.equal(clock.timers.size, 0);
+});
+
+test("waitFor an already-aborted signal resolves without retaining resources", async () => {
+  const clock = new WaitClock();
+  const signal = new TrackedAbortSignal();
+  signal.abort();
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner, setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+  const [job] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.ok(job);
+
+  const result = await manager.waitFor({ ids: [job.id], until: "all", timeoutMs: 100, signal: signal as unknown as AbortSignal });
+
+  assert.equal(result.outcome, "aborted");
+  assert.equal(clock.timers.size, 0);
+  assert.equal(runner.started[0]?.cancelCalls, 0);
 });
