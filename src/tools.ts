@@ -189,22 +189,39 @@ const description = [
   "Concurrent writable jobs should receive non-overlapping work.",
 ].join(" ");
 
-const renderToolResult = (result: ToolResponse & { details: ToolDetails }, expanded: boolean, theme: { fg(color: string, text: string): string }): string => {
+const iconForState = (state: Job["state"]): string => {
+  if (state === "completed") return "✓";
+  if (state === "failed" || state === "cancelled") return "✗";
+  if (state === "collected") return "↳";
+  if (state === "discarded") return "⌫";
+  return state === "queued" ? "○" : "…";
+};
+
+const renderWaitResult = (
+  result: ToolResponse,
+  expanded: boolean,
+  theme: { fg(color: string, text: string): string },
+): string => {
+  if (!("outcome" in result.details)) return "";
+  const { outcome, jobs, until, timeoutMs, elapsedMs } = result.details;
+  const label = outcome === "completed" ? "Wait completed" : outcome === "timed_out" ? "Wait timed out" : "Wait aborted";
+  const compact = [label, ...jobs.map((job) => `${iconForState(job.state)} ${job.id} ${job.state}`)].join("\n");
+  const detail = expanded
+    ? `Condition: ${until}\nConfigured timeout: ${timeoutMs} ms\nElapsed: ${elapsedMs} ms`
+    : "";
+  return theme.fg("muted", [compact, detail].filter(Boolean).join("\n\n"));
+};
+
+const renderToolResult = (result: ToolResponse, expanded: boolean, theme: { fg(color: string, text: string): string }): string => {
+  if ("outcome" in result.details) return renderWaitResult(result, expanded, theme);
   const { jobs, diagnostics, operation } = result.details;
   const content = result.content.find((part) => part.type === "text")?.text ?? "";
-  const icon = (state: Job["state"]): string => {
-    if (state === "completed") return "✓";
-    if (state === "failed" || state === "cancelled") return "✗";
-    if (state === "collected") return "↳";
-    if (state === "discarded") return "⌫";
-    return state === "queued" ? "○" : "…";
-  };
   const heading = jobs.length === 0 ? "" : operation === "start" ? `Started ${jobs.length} job${jobs.length === 1 ? "" : "s"}`
     : operation === "collect" ? `Collected ${jobs.length} result${jobs.length === 1 ? "" : "s"}`
       : operation === "discard" ? `Discarded ${jobs.length} job${jobs.length === 1 ? "" : "s"}`
         : operation === "cancel" ? `Cancelled ${jobs.length} job${jobs.length === 1 ? "" : "s"}`
           : `Jobs: ${jobs.length}`;
-  const compact = [heading, ...jobs.map((job) => `${icon(job.state)} ${job.id} ${job.state}`), ...diagnostics].filter(Boolean).join("\n") || content;
+  const compact = [heading, ...jobs.map((job) => `${iconForState(job.state)} ${job.id} ${job.state}`), ...diagnostics].filter(Boolean).join("\n") || content;
   if (!expanded) return theme.fg("muted", compact);
 
   const detail = operation === "collect" || diagnostics.length > 0 ? content
@@ -231,6 +248,27 @@ export function registerSubagentTools(pi: ExtensionAPI, services: ToolServices):
     execute: async (_id, input) => statusJobs(input, services),
     renderCall: (input, theme) => new Text(theme.fg("toolTitle", input.id ? `subagent_status ${input.id}` : "subagent_status"), 0, 0),
     renderResult: (result, { expanded }, theme) => new Text(renderToolResult(result as ToolResponse & { details: ToolDetails }, expanded, theme), 0, 0),
+  });
+  pi.registerTool({
+    name: "subagent_wait",
+    label: "Wait for Subagents",
+    description: [
+      "Wait once for requested jobs only when they are expected to finish soon and no useful parent work can proceed meanwhile.",
+      "The wait lasts at most 30 seconds and returns current states without collecting output or cancelling jobs.",
+      "After a timeout, do not call subagent_wait again immediately; continue other work or return control.",
+    ].join(" "),
+    parameters: WaitParams,
+    execute: async (_id, input, signal) => waitJobs(input, services, signal),
+    renderCall: (input, theme) => new Text(
+      theme.fg("toolTitle", `subagent_wait ${input.until ?? "all"} ${input.ids.join(", ")}`),
+      0,
+      0,
+    ),
+    renderResult: (result, { expanded }, theme) => new Text(
+      renderToolResult(result as ToolResponse, expanded, theme),
+      0,
+      0,
+    ),
   });
   pi.registerTool({
     name: "subagent_control",

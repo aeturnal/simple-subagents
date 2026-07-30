@@ -462,6 +462,76 @@ test("tool renderers preserve task detail when expanded and keep compact control
   assert.match(compactDiscard, /⌫ job-2 discarded/);
 });
 
+test("registered subagent_wait forwards the parent tool signal without cancelling jobs", async () => {
+  const pi = new FakePi();
+  const { services, runner } = createServices();
+  registerSubagentTools(pi as never, services);
+  await startJobs({ tasks: [{ task: "keep running" }] }, services, {} as never);
+  const controller = new AbortController();
+  const wait = pi.tools.get("subagent_wait");
+  assert.ok(wait);
+
+  const executing = wait.execute(
+    "call",
+    { ids: ["job-1"], until: "all", timeoutMs: 30_000 },
+    controller.signal,
+    undefined,
+    {} as never,
+  );
+  controller.abort();
+  const result = await executing;
+
+  assert.equal(result.details.outcome, "aborted");
+  assert.equal(services.manager.get("job-1")?.state, "running");
+  assert.equal(runner.started[0]?.cancelled, 0);
+});
+
+test("subagent_wait description limits use to one short near-completion wait", () => {
+  const pi = new FakePi();
+  const { services } = createServices();
+  registerSubagentTools(pi as never, services);
+
+  const description = pi.tools.get("subagent_wait")?.description ?? "";
+  assert.match(description, /expected to finish soon/i);
+  assert.match(description, /no useful parent work/i);
+  assert.match(description, /at most 30 seconds/i);
+  assert.match(description, /do not.*again immediately/i);
+});
+
+test("subagent_wait renderer shows state-only compact and expanded details", () => {
+  const pi = new FakePi();
+  const { services } = createServices();
+  registerSubagentTools(pi as never, services);
+  const theme = { fg: (_color: string, value: string) => value };
+  const details = {
+    operation: "wait" as const,
+    outcome: "timed_out" as const,
+    until: "all" as const,
+    timeoutMs: 15_000,
+    elapsedMs: 15_003,
+    jobs: [
+      { id: "job-1", state: "running" as const },
+      { id: "job-2", state: "completed" as const },
+    ],
+  };
+  const result = {
+    content: [{ type: "text" as const, text: "Wait timed out after 15000 ms: job-1 (running), job-2 (completed)." }],
+    details,
+  };
+  const renderer = pi.tools.get("subagent_wait")?.renderResult;
+  const compact = renderer(result, { expanded: false }, theme).render(160).join("\n");
+  const expanded = renderer(result, { expanded: true }, theme).render(160).join("\n");
+
+  assert.match(compact, /Wait timed out/);
+  assert.match(compact, /… job-1 running/);
+  assert.match(compact, /✓ job-2 completed/);
+  assert.doesNotMatch(compact, /Condition|Configured timeout|Elapsed/);
+  assert.match(expanded, /Condition: all/);
+  assert.match(expanded, /Configured timeout: 15000 ms/);
+  assert.match(expanded, /Elapsed: 15003 ms/);
+  assert.doesNotMatch(expanded, /output|stderr|task|profile|usage/i);
+});
+
 test("startJobs propagates profile and default resolution failures", async () => {
   const profileFailure = createServices(undefined, { getProfiles: async () => { throw new Error("profiles unavailable"); } });
   await assert.rejects(startJobs({ tasks: [{ task: "inspect" }] }, profileFailure.services, {} as never), /profiles unavailable/);
@@ -516,6 +586,9 @@ test("registered tools expose strict schema boundaries and required guidance", (
     assert.match(description, /concise.*split.*collect.*individually/i);
     assert.match(description, /non-overlapping/i);
   }
+  assert.ok(pi.tools.get("subagent_wait"));
+  assert.equal(pi.tools.get("subagent_wait")?.parameters, WaitParams);
+  assert.match(pi.tools.get("subagent_wait")?.description ?? "", /at most 30 seconds/i);
 });
 
 test("completion notices debounce real terminal transitions at 100 ms, including cancellation, without leaking output", async () => {
