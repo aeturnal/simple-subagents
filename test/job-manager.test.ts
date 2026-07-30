@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { JobManager } from "../src/job-manager.js";
 import type { ProcessResult, ProcessRunOptions, ProcessRunner, RunningProcess } from "../src/process-runner.ts";
-import type { AgentProfile, JobRequest, ProgressItem, UsageStats } from "../src/types.ts";
+import { isSettled, type AgentProfile, type JobRequest, type ProgressItem, type UsageStats } from "../src/types.ts";
 
 const usage = (): UsageStats => ({ input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: 0.5, turns: 1 });
 
@@ -789,4 +789,69 @@ test("shutdown cancels queued and active work then waits for active settlement",
   assert.equal(manager.get(active.id)?.state, "cancelled");
   assert.equal(manager.get(queued.id)?.state, "cancelled");
   assert.equal(runner.started.length, 1);
+});
+
+test("waitFor validates duplicate and unknown IDs before installing wait resources", async () => {
+  const runner = new ControlledRunner();
+  const timerDelays: number[] = [];
+  const manager = new JobManager({
+    runner,
+    setTimer: (_callback, delay) => {
+      timerDelays.push(delay);
+      return delay;
+    },
+    clearTimer: () => {},
+  });
+  const [job] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.ok(job);
+  let subscribeCalls = 0;
+  const subscribe = manager.subscribe.bind(manager);
+  manager.subscribe = (listener) => {
+    subscribeCalls += 1;
+    return subscribe(listener);
+  };
+
+  await assert.rejects(
+    manager.waitFor({ ids: [job.id, job.id], until: "all", timeoutMs: 1_000 }),
+    /Duplicate job ID: job-1/,
+  );
+  await assert.rejects(
+    manager.waitFor({ ids: [job.id, "missing"], until: "all", timeoutMs: 1_000 }),
+    /Unknown job: missing/,
+  );
+  assert.deepEqual(timerDelays, []);
+  assert.equal(subscribeCalls, 0);
+});
+
+test("waitFor immediately returns state-only snapshots when all jobs are settled", async () => {
+  let now = 250;
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner, now: () => now });
+  const [completedJob, discardedJob] = manager.enqueue(makeRequests(2), profiles, defaults);
+  assert.ok(completedJob && discardedJob);
+  runner.complete(0, successfulResult("private completed output"));
+  runner.complete(1, failedResult({ output: "private failed output" }));
+  await runner.flush();
+  manager.discard(discardedJob.id);
+  now = 400;
+
+  const result = await manager.waitFor({
+    ids: [completedJob.id, discardedJob.id],
+    until: "all",
+    timeoutMs: 15_000,
+  });
+
+  assert.deepEqual(result, {
+    operation: "wait",
+    outcome: "completed",
+    until: "all",
+    timeoutMs: 15_000,
+    elapsedMs: 0,
+    jobs: [
+      { id: completedJob.id, state: "completed" },
+      { id: discardedJob.id, state: "discarded" },
+    ],
+  });
+  assert.equal("output" in result.jobs[0]!, false);
+  assert.equal(result.jobs.every((job) => isSettled(job.state)), true);
 });

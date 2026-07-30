@@ -1,10 +1,34 @@
 import type { ProcessResult, ProcessRunner, RunningProcess } from "./process-runner.js";
 import { CAPTURED_TEXT_MAX_BYTES, MALFORMED_EVENT_SAMPLE_MAX_BYTES, truncateUtf8 } from "./output.js";
-import type { AgentProfile, Job, JobRequest, JobState, ProgressItem, UsageStats } from "./types.js";
+import { isSettled, type AgentProfile, type Job, type JobRequest, type JobState, type ProgressItem, type UsageStats } from "./types.js";
 
 const MAX_CONCURRENCY = 4;
 const MAX_BATCH_SIZE = 8;
 const MAX_PROGRESS_ITEMS = 200;
+
+export type WaitUntil = "any" | "all";
+export type WaitOutcome = "completed" | "timed_out" | "aborted";
+
+export interface WaitJobStatus {
+  id: string;
+  state: JobState;
+}
+
+export interface WaitResult {
+  operation: "wait";
+  outcome: WaitOutcome;
+  until: WaitUntil;
+  timeoutMs: number;
+  elapsedMs: number;
+  jobs: WaitJobStatus[];
+}
+
+export interface WaitForOptions {
+  ids: readonly string[];
+  until: WaitUntil;
+  timeoutMs: number;
+  signal?: AbortSignal;
+}
 
 const emptyUsage = (): UsageStats => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 });
 
@@ -26,6 +50,8 @@ export class JobManager {
   private readonly runner: ProcessRunner;
   private readonly concurrency: number;
   private readonly now: () => number;
+  private readonly setTimer: (callback: () => void, delay: number) => unknown;
+  private readonly clearTimer: (timer: unknown) => void;
   private readonly jobs = new Map<string, InternalJob>();
   private readonly queue: string[] = [];
   private readonly active = new Map<string, RunningProcess>();
@@ -35,7 +61,13 @@ export class JobManager {
   private stopped = false;
   private shutdownPromise?: Promise<void>;
 
-  constructor(options: { runner: ProcessRunner; concurrency?: number; now?: () => number }) {
+  constructor(options: {
+    runner: ProcessRunner;
+    concurrency?: number;
+    now?: () => number;
+    setTimer?: (callback: () => void, delay: number) => unknown;
+    clearTimer?: (timer: unknown) => void;
+  }) {
     const concurrency = options.concurrency ?? MAX_CONCURRENCY;
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > MAX_CONCURRENCY) {
       throw new Error("Concurrency must be an integer between 1 and 4");
@@ -44,6 +76,8 @@ export class JobManager {
     this.runner = options.runner;
     this.concurrency = concurrency;
     this.now = options.now ?? Date.now;
+    this.setTimer = options.setTimer ?? ((callback, delay) => setTimeout(callback, delay));
+    this.clearTimer = options.clearTimer ?? ((timer) => clearTimeout(timer as NodeJS.Timeout));
   }
 
   enqueue(
@@ -147,6 +181,43 @@ export class JobManager {
       // A listener cannot disrupt the manager.
     }
     return () => this.subscribers.delete(listener);
+  }
+
+  async waitFor(options: WaitForOptions): Promise<WaitResult> {
+    const seen = new Set<string>();
+    for (const id of options.ids) {
+      if (seen.has(id)) throw new Error(`Duplicate job ID: ${id}`);
+      seen.add(id);
+      this.requireJob(id);
+    }
+
+    const startedAt = this.now();
+    const jobs = this.waitSnapshots(options.ids);
+    if (this.waitSatisfied(jobs, options.until)) {
+      return {
+        operation: "wait",
+        outcome: "completed",
+        until: options.until,
+        timeoutMs: options.timeoutMs,
+        elapsedMs: this.now() - startedAt,
+        jobs,
+      };
+    }
+
+    throw new Error("Wait condition is not yet satisfied");
+  }
+
+  private waitSnapshots(ids: readonly string[]): WaitJobStatus[] {
+    return ids.map((id) => {
+      const entry = this.requireJob(id);
+      return { id, state: entry.job.state };
+    });
+  }
+
+  private waitSatisfied(jobs: readonly WaitJobStatus[], until: WaitUntil): boolean {
+    return until === "any"
+      ? jobs.some((job) => isSettled(job.state))
+      : jobs.every((job) => isSettled(job.state));
   }
 
   shutdown(): Promise<void> {
