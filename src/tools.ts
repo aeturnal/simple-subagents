@@ -4,6 +4,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { JobManager, type WaitJobStatus, type WaitResult, type WaitUntil } from "./job-manager.js";
 import { capCollectedPayload, formatCollectedResult } from "./output.js";
+import { buildPublicAgentDiscovery, type PublicAgentProfile } from "./profile-discovery.js";
 import type { AgentProfile, Job, JobRequest } from "./types.js";
 
 const StartTask = Type.Object({
@@ -16,6 +17,7 @@ const StartTask = Type.Object({
 export const StartParams = Type.Object({
   tasks: Type.Array(StartTask, { minItems: 1, maxItems: 8 }),
 });
+export const AgentsParams = Type.Object({}, { additionalProperties: false });
 export const StatusParams = Type.Object({ id: Type.Optional(Type.String()) });
 export const ControlParams = Type.Object({
   action: StringEnum(["cancel", "collect", "discard"] as const),
@@ -28,6 +30,7 @@ export const WaitParams = Type.Object({
 });
 
 export type StartInput = Static<typeof StartParams>;
+export type AgentsInput = Static<typeof AgentsParams>;
 export type StatusInput = Static<typeof StatusParams>;
 export type ControlInput = Static<typeof ControlParams>;
 export type WaitInput = Static<typeof WaitParams>;
@@ -43,10 +46,21 @@ export interface ToolServices {
 export interface ToolDetails {
   jobs: Job[];
   diagnostics: string[];
-  operation?: "start" | "status" | "wait" | "cancel" | "collect" | "discard";
+  operation?: "agents" | "start" | "status" | "wait" | "cancel" | "collect" | "discard";
+  profiles?: PublicAgentProfile[];
+  omittedProfiles?: number;
 }
 
 export type WaitToolDetails = WaitResult;
+
+export interface AgentsToolResponse {
+  content: Array<{ type: "text"; text: string }>;
+  details: ToolDetails & {
+    operation: "agents";
+    profiles: PublicAgentProfile[];
+    omittedProfiles: number;
+  };
+}
 
 export interface ToolResponse {
   content: Array<{ type: "text"; text: string }>;
@@ -71,6 +85,21 @@ const toRequest = (task: StartInput["tasks"][number]): JobRequest => ({
 });
 
 const summary = (jobs: readonly Job[]): string => jobs.map((job) => `${job.id} (${job.state})`).join(", ");
+
+export async function listAgents(services: ToolServices): Promise<AgentsToolResponse> {
+  const profiles = await services.getProfiles();
+  const discovery = buildPublicAgentDiscovery([...profiles.values()]);
+  return {
+    content: [{ type: "text", text: discovery.content }],
+    details: {
+      jobs: [],
+      diagnostics: [],
+      operation: "agents",
+      profiles: discovery.profiles,
+      omittedProfiles: discovery.omittedProfiles,
+    },
+  };
+}
 
 export async function startJobs(input: StartInput, services: ToolServices, ctx: ExtensionContext): Promise<ToolResponse & { details: ToolDetails }> {
   if (input.tasks.length > 8) return response("A start batch accepts at most 8 jobs.", [], ["A start batch accepts at most 8 jobs."], "start");
@@ -212,6 +241,30 @@ const renderWaitResult = (
   return theme.fg("muted", [compact, detail].filter(Boolean).join("\n\n"));
 };
 
+const renderAgentProfiles = (
+  result: AgentsToolResponse,
+  expanded: boolean,
+  theme: { fg(color: string, text: string): string },
+): string => {
+  const profiles = result.details.profiles ?? [];
+  const omitted = result.details.omittedProfiles ?? 0;
+  const compact = [
+    "Available subagent profiles:",
+    ...profiles.map((profile) => `- ${profile.name} — ${profile.description}`),
+    ...(omitted > 0 ? [`- ${omitted} additional profile${omitted === 1 ? "" : "s"} omitted`] : []),
+  ].join("\n");
+  if (!expanded) return theme.fg("muted", compact);
+
+  const detail = profiles.map((profile) => [
+    `${profile.name} — ${profile.description}`,
+    `  Model: ${profile.model ?? "parent model (inherited)"}`,
+    `  Read-only launch allowlist: ${profile.readOnlyToolAllowlist.join(", ") || "none"}`,
+    `  Writable launch allowlist: ${profile.writableToolAllowlist.join(", ") || "none"}`,
+    `  Supports write-capable tools: ${profile.supportsWrite ? "yes" : "no"}`,
+  ].join("\n")).join("\n\n");
+  return theme.fg("muted", [compact, detail].filter(Boolean).join("\n\n"));
+};
+
 const renderToolResult = (result: ToolResponse, expanded: boolean, theme: { fg(color: string, text: string): string }): string => {
   if ("outcome" in result.details) return renderWaitResult(result, expanded, theme);
   const { jobs, diagnostics, operation } = result.details;
@@ -231,6 +284,16 @@ const renderToolResult = (result: ToolResponse, expanded: boolean, theme: { fg(c
 };
 
 export function registerSubagentTools(pi: ExtensionAPI, services: ToolServices): void {
+  pi.registerTool({
+    name: "subagent_agents",
+    label: "Subagent Profiles",
+    description: "List available subagent profile names and safe public capabilities. Call only when profile names or capabilities are unknown, not before every job. Launch allowlists are requested child Pi tools, not write authorization or a runtime sandbox.",
+    parameters: AgentsParams,
+    execute: async () => listAgents(services),
+    renderCall: (_input, theme) => new Text(theme.fg("toolTitle", "subagent_agents"), 0, 0),
+    renderResult: (result, { expanded }, theme) =>
+      new Text(renderAgentProfiles(result as AgentsToolResponse, expanded, theme), 0, 0),
+  });
   pi.registerTool({
     name: "subagent_start",
     label: "Start Subagents",

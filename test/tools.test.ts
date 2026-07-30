@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Check } from "typebox/value";
 import {
+  AgentsParams,
   ControlParams,
   StartParams,
   StatusParams,
   WaitParams,
   controlJobs,
+  listAgents,
   registerSubagentTools,
   startJobs,
   statusJobs,
@@ -73,6 +75,35 @@ const createServices = (runner = new ControlledRunner(), overrides: Partial<Tool
   };
   return { services, runner };
 };
+
+test("listAgents returns bounded public profiles without private discovery data", async () => {
+  const secretProfile: AgentProfile = {
+    name: "reviewer",
+    description: "Review changed code",
+    systemPrompt: "SECRET PROMPT",
+    source: "user",
+    model: "anthropic/sonnet",
+    tools: ["read", "grep"],
+    filePath: "/secret/agents/reviewer.md",
+  };
+  const { services } = createServices(undefined, {
+    getProfiles: async () => new Map([
+      ["generic", { ...profile, name: "generic", description: "Generic coding agent", source: "builtin" as const }],
+      ["reviewer", secretProfile],
+    ]),
+  });
+
+  const result = await listAgents(services);
+  const serialized = JSON.stringify(result);
+
+  assert.deepEqual(result.details.profiles?.map((entry) => entry.name), ["generic", "reviewer"]);
+  assert.equal(result.details.omittedProfiles, 0);
+  assert.match(text(result), /Available subagent profiles/);
+  assert.match(text(result), /reviewer — Review changed code/);
+  assert.doesNotMatch(serialized, /SECRET PROMPT|\/secret\/agents|systemPrompt|filePath/);
+  assert.deepEqual(result.details.jobs, []);
+  assert.deepEqual(result.details.diagnostics, []);
+});
 
 test("startJobs applies generic read-only defaults and reports every created ID", async () => {
   const { services, runner } = createServices();
@@ -455,6 +486,19 @@ test("tool renderers preserve task detail when expanded and keep compact control
   assert.match(render("subagent_start", declined, true), /Writable jobs were declined\./);
   assert.match(render("subagent_control", invalid, true), /Cannot collect/i);
 
+  const agents = await listAgents(services);
+  const compactAgents = render("subagent_agents", agents, false);
+  assert.match(compactAgents, /Available subagent profiles:/);
+  assert.match(compactAgents, /- generic — Reviews code/);
+  assert.match(compactAgents, /- reviewer — Reviews code/);
+  assert.doesNotMatch(compactAgents, /Configured model|launch allowlist/);
+  const expandedAgents = render("subagent_agents", agents, true);
+  assert.match(expandedAgents, /reviewer — Reviews code/);
+  assert.match(expandedAgents, /Model: parent model \(inherited\)/);
+  assert.match(expandedAgents, /Read-only launch allowlist: none/);
+  assert.match(expandedAgents, /Writable launch allowlist: none/);
+  assert.match(expandedAgents, /Supports write-capable tools: no/);
+
   await controlJobs({ action: "cancel", ids: ["job-2"] }, services);
   const discarded = await controlJobs({ action: "discard", ids: ["job-2"] }, services);
   const compactDiscard = render("subagent_control", discarded, false);
@@ -575,6 +619,16 @@ test("registered tools expose strict schema boundaries and required guidance", (
   assert.deepEqual(controlSchema.properties.action.enum, ["cancel", "collect", "discard"]);
   assert.equal(controlSchema.properties.ids.minItems, 1);
   assert.equal(controlSchema.properties.ids.maxItems, 8);
+  const agentsSchema = AgentsParams as unknown as {
+    type: string;
+    properties: Record<string, unknown>;
+    additionalProperties: boolean;
+  };
+  assert.equal(agentsSchema.type, "object");
+  assert.deepEqual(agentsSchema.properties, {});
+  assert.equal(agentsSchema.additionalProperties, false);
+  assert.match(pi.tools.get("subagent_agents")?.description ?? "", /only when.*unknown/i);
+  assert.match(pi.tools.get("subagent_agents")?.description ?? "", /launch allowlist.*not.*authorization/i);
 
   for (const name of ["subagent_start", "subagent_status", "subagent_control"]) {
     const description = pi.tools.get(name)?.description ?? "";
@@ -586,6 +640,8 @@ test("registered tools expose strict schema boundaries and required guidance", (
     assert.match(description, /concise.*split.*collect.*individually/i);
     assert.match(description, /non-overlapping/i);
   }
+  assert.ok(pi.tools.get("subagent_agents"));
+  assert.equal(pi.tools.get("subagent_agents")?.parameters, AgentsParams);
   assert.ok(pi.tools.get("subagent_wait"));
   assert.equal(pi.tools.get("subagent_wait")?.parameters, WaitParams);
   assert.match(pi.tools.get("subagent_wait")?.description ?? "", /at most 30 seconds/i);
@@ -907,6 +963,11 @@ test("runtime loads config and profiles, surfaces diagnostics, confirms writable
   await pi.emit("session_start", {}, fakeContext({ hasUI: true }, pi));
 
   assert.deepEqual(pi.notifications, [["config warning", "warning"], ["profile warning", "warning"]]);
+  const agents = pi.tools.get("subagent_agents");
+  assert.ok(agents);
+  const discovered = await agents.execute("call", {}, undefined, undefined, fakeContext({ hasUI: true }, pi));
+  assert.match(text(discovered), /writer/);
+  assert.doesNotMatch(JSON.stringify(discovered), /profile warning/);
   const start = pi.tools.get("subagent_start");
   assert.ok(start);
   const result = await start.execute("call", { tasks: [{ task: "write", agent: "writer", writeAccess: true }, { task: "also write", agent: "writer", writeAccess: true }] }, undefined, undefined, fakeContext({ hasUI: true }, pi));
