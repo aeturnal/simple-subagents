@@ -204,7 +204,29 @@ export class JobManager {
       };
     }
 
-    throw new Error("Wait condition is not yet satisfied");
+    return new Promise<WaitResult>((resolve) => {
+      let settled = false;
+      let unsubscribe: (() => void) | undefined;
+
+      const settleCompleted = () => {
+        if (settled) return;
+        const current = this.waitSnapshots(options.ids);
+        if (!this.waitSatisfied(current, options.until)) return;
+        settled = true;
+        unsubscribe?.();
+        resolve({
+          operation: "wait",
+          outcome: "completed",
+          until: options.until,
+          timeoutMs: options.timeoutMs,
+          elapsedMs: this.now() - startedAt,
+          jobs: current,
+        });
+      };
+
+      unsubscribe = this.subscribe(settleCompleted);
+      if (settled) unsubscribe();
+    });
   }
 
   private waitSnapshots(ids: readonly string[]): WaitJobStatus[] {

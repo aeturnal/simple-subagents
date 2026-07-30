@@ -855,3 +855,72 @@ test("waitFor immediately returns state-only snapshots when all jobs are settled
   assert.equal("output" in result.jobs[0]!, false);
   assert.equal(result.jobs.every((job) => isSettled(job.state)), true);
 });
+
+test("waitFor any settles on the first failed or cancelled requested job", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner, concurrency: 2 });
+  const [first, second] = manager.enqueue(makeRequests(2), profiles, defaults);
+  assert.ok(first && second);
+
+  const waiting = manager.waitFor({ ids: [first.id, second.id], until: "any", timeoutMs: 30_000 });
+  runner.complete(1, failedResult());
+  const result = await waiting;
+
+  assert.equal(result.outcome, "completed");
+  assert.deepEqual(result.jobs.map(({ id, state }) => [id, state]), [
+    [first.id, "running"],
+    [second.id, "failed"],
+  ]);
+  assert.equal(runner.started[0]?.cancelCalls, 0);
+});
+
+test("waitFor all ignores queued and running states until every requested job settles", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner, concurrency: 1 });
+  const [first, second] = manager.enqueue(makeRequests(2), profiles, defaults);
+  assert.ok(first && second);
+
+  let resolved = false;
+  const waiting = manager.waitFor({ ids: [second.id, first.id], until: "all", timeoutMs: 30_000 });
+  void waiting.then(() => { resolved = true; });
+  runner.complete(0, successfulResult("first"));
+  await runner.flush();
+  assert.equal(resolved, false);
+  assert.equal(manager.get(second.id)?.state, "running");
+
+  runner.complete(1, successfulResult("second"));
+  await runner.flush();
+  const result = await waiting;
+  assert.equal(result.outcome, "completed");
+  assert.deepEqual(result.jobs.map(({ id, state }) => [id, state]), [
+    [second.id, "completed"],
+    [first.id, "completed"],
+  ]);
+});
+
+test("waitFor treats cancelled, collected, and discarded jobs as settled", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner, concurrency: 3 });
+  const [collected, discarded, cancelled] = manager.enqueue(makeRequests(3), profiles, defaults);
+  assert.ok(collected && discarded && cancelled);
+  runner.complete(0, successfulResult("collect me"));
+  runner.complete(1, successfulResult("discard me"));
+  await runner.flush();
+  manager.collect(collected.id);
+  manager.discard(discarded.id);
+  const cancelling = manager.cancel(cancelled.id);
+  runner.releaseCancel(2);
+  await cancelling;
+
+  const result = await manager.waitFor({
+    ids: [cancelled.id, collected.id, discarded.id],
+    until: "all",
+    timeoutMs: 30_000,
+  });
+
+  assert.deepEqual(result.jobs, [
+    { id: cancelled.id, state: "cancelled" },
+    { id: collected.id, state: "collected" },
+    { id: discarded.id, state: "discarded" },
+  ]);
+});
