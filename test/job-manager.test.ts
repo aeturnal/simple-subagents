@@ -1113,3 +1113,61 @@ test("waitFor an already-aborted signal resolves without retaining resources", a
   assert.equal(clock.timers.size, 0);
   assert.equal(runner.started[0]?.cancelCalls, 0);
 });
+
+test("multiple simultaneous waiters settle independently", async () => {
+  const clock = new WaitClock();
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner, concurrency: 2, setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+  const [first, second] = manager.enqueue(makeRequests(2), profiles, defaults);
+  assert.ok(first && second);
+
+  const any = manager.waitFor({ ids: [first.id, second.id], until: "any", timeoutMs: 30_000 });
+  const all = manager.waitFor({ ids: [first.id, second.id], until: "all", timeoutMs: 30_000 });
+  runner.complete(0, successfulResult("first"));
+  await runner.flush();
+  assert.equal((await any).outcome, "completed");
+  assert.equal(clock.timers.size, 1);
+
+  runner.complete(1, successfulResult("second"));
+  await runner.flush();
+  assert.equal((await all).outcome, "completed");
+  assert.equal(clock.timers.size, 0);
+});
+
+test("shutdown aborts waiters before cancelling jobs and clears their resources", async () => {
+  const clock = new WaitClock();
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner, concurrency: 1, setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+  const [running, queued] = manager.enqueue(makeRequests(2), profiles, defaults);
+  assert.ok(running && queued);
+  const observed: Array<[string, string]> = [];
+  const waiting = manager.waitFor({ ids: [running.id, queued.id], until: "all", timeoutMs: 30_000 }).then((result) => {
+    observed.push(...result.jobs.map((job) => [job.id, job.state] as [string, string]));
+    return result;
+  });
+
+  const stopping = manager.shutdown();
+  const result = await waiting;
+  assert.equal(result.outcome, "aborted");
+  assert.deepEqual(observed, [[running.id, "running"], [queued.id, "queued"]]);
+  assert.equal(manager.get(queued.id)?.state, "cancelled");
+  assert.equal(clock.timers.size, 0);
+
+  runner.releaseCancel(0);
+  runner.complete(0, successfulResult("late"));
+  await stopping;
+});
+
+test("a throwing manager subscriber cannot strand a waiter", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  manager.subscribe(() => { throw new Error("listener failed"); });
+  const [job] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.ok(job);
+
+  const waiting = manager.waitFor({ ids: [job.id], until: "all", timeoutMs: 30_000 });
+  runner.complete(0, successfulResult("done"));
+  await runner.flush();
+
+  assert.equal((await waiting).outcome, "completed");
+});

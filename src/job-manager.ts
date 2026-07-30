@@ -57,6 +57,7 @@ export class JobManager {
   private readonly active = new Map<string, RunningProcess>();
   private readonly starting = new Map<string, StartingRun>();
   private readonly subscribers = new Set<(jobs: readonly Job[]) => void>();
+  private readonly waiters = new Set<() => void>();
   private nextId = 1;
   private stopped = false;
   private shutdownPromise?: Promise<void>;
@@ -209,9 +210,11 @@ export class JobManager {
       let timer: unknown;
       let unsubscribe: (() => void) | undefined;
       let settle!: (outcome: WaitOutcome) => void;
+      let abortForShutdown!: () => void;
       const onAbort = () => settle("aborted");
 
       const cleanup = () => {
+        this.waiters.delete(abortForShutdown);
         unsubscribe?.();
         unsubscribe = undefined;
         if (timer !== undefined) this.clearTimer(timer);
@@ -235,6 +238,8 @@ export class JobManager {
         });
       };
 
+      abortForShutdown = () => settle("aborted");
+      this.waiters.add(abortForShutdown);
       unsubscribe = this.subscribe(() => settle("completed"));
       if (settled) {
         unsubscribe();
@@ -267,6 +272,7 @@ export class JobManager {
   shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
     this.stopped = true;
+    for (const abortWaiter of [...this.waiters]) abortWaiter();
 
     for (const id of this.queue) {
       const entry = this.jobs.get(id);
