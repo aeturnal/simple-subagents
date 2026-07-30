@@ -72,15 +72,14 @@ export function buildPublicAgentDiscovery(privateProfiles: readonly AgentProfile
 
   for (const candidate of mapped) {
     const next = [...profiles, candidate];
-    const allIncluded = next.length === mapped.length;
-    const reservedOmitted = allIncluded ? 0 : mapped.length;
-    const content = formatContent(next, reservedOmitted);
+    const omittedProfiles = mapped.length - next.length;
+    const content = formatContent(next, omittedProfiles);
     const details = JSON.stringify({
       jobs: [],
       diagnostics: [],
       operation: "agents",
       profiles: next,
-      omittedProfiles: reservedOmitted,
+      omittedProfiles,
     });
 
     if (Buffer.byteLength(content, "utf8") > PUBLIC_DISCOVERY_MAX_BYTES

@@ -99,6 +99,63 @@ test("formats deterministic public discovery without private profile fields", ()
   assert.doesNotMatch(discovery.content, /private generic|private reviewer/);
 });
 
+test("keeps a decimal-width boundary record when its exact omission count fits", () => {
+  const maximumProfile = (index: number): AgentProfile => ({
+    name: `a${index}${"n".repeat(120)}`,
+    description: "d".repeat(512),
+    systemPrompt: `SECRET-${index}`,
+    source: "user",
+    model: `p/${"m".repeat(500)}`,
+    tools: ["read", "grep", "bash", "write"],
+  });
+  const profiles = Array.from({ length: 100 }, (_, index) => maximumProfile(index));
+  profiles[37] = { ...maximumProfile(37), description: "x".repeat(365) };
+
+  const discovery = buildPublicAgentDiscovery(profiles);
+  const detailsText = JSON.stringify({
+    jobs: [],
+    diagnostics: [],
+    operation: "agents",
+    profiles: discovery.profiles,
+    omittedProfiles: discovery.omittedProfiles,
+  });
+
+  assert.equal(discovery.profiles.length, 38);
+  assert.equal(discovery.omittedProfiles, 62);
+  assert.ok(Buffer.byteLength(discovery.content, "utf8") <= PUBLIC_DISCOVERY_MAX_BYTES);
+  assert.ok(Buffer.byteLength(detailsText, "utf8") <= PUBLIC_DISCOVERY_MAX_BYTES);
+
+  const firstOmittedProfile = profiles[discovery.profiles.length];
+  assert.ok(firstOmittedProfile);
+  const nextProfiles = [...discovery.profiles, toPublicAgentProfile(firstOmittedProfile)];
+  const nextOmittedProfiles = profiles.length - nextProfiles.length;
+  const nextContent = [
+    "Available subagent profiles:",
+    ...nextProfiles.map((profile) => [
+      `- ${profile.name} — ${profile.description}`,
+      `  Source: ${profile.source}`,
+      `  Configured model: ${profile.model ?? "none"}`,
+      `  Inherits parent model: ${profile.inheritsParentModel ? "yes" : "no"}`,
+      `  Read-only launch allowlist: ${profile.readOnlyToolAllowlist.join(", ") || "none"}`,
+      `  Writable launch allowlist: ${profile.writableToolAllowlist.join(", ") || "none"}`,
+      `  Supports write-capable tools: ${profile.supportsWrite ? "yes" : "no"}`,
+    ].join("\n")),
+    `Omitted ${nextOmittedProfiles} profiles because discovery output is limited to 50 KiB.`,
+  ].join("\n");
+  const nextDetailsText = JSON.stringify({
+    jobs: [],
+    diagnostics: [],
+    operation: "agents",
+    profiles: nextProfiles,
+    omittedProfiles: nextOmittedProfiles,
+  });
+
+  assert.ok(
+    Buffer.byteLength(nextContent, "utf8") > PUBLIC_DISCOVERY_MAX_BYTES
+      || Buffer.byteLength(nextDetailsText, "utf8") > PUBLIC_DISCOVERY_MAX_BYTES,
+  );
+});
+
 test("bounds both discovery representations using one whole-record prefix", () => {
   const many = Array.from({ length: 200 }, (_, index): AgentProfile => ({
     name: `agent-${index}-${"😀".repeat(40)}`,
