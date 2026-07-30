@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import test from "node:test";
+import { getLaunchToolAllowlist } from "../src/profile-capabilities.ts";
 import { PiProcessRunner } from "../src/process-runner.ts";
 import { CAPTURED_TEXT_MAX_BYTES } from "../src/output.ts";
 import type { AgentProfile, JobRequest, ProgressItem } from "../src/types.ts";
@@ -208,14 +209,19 @@ test("disables Pi default tools when a named read-only profile requests only bas
 
 test("permits requested write tools for writable named profiles", async () => {
   const { child, runner, invocation } = spawnedRunner();
+  const selected = profile({ tools: ["write", "bash", "read", "edit", "read", "unknown"] });
   const running = runner.run({
     cwd: "/workspace",
     request: request(true),
-    profile: profile({ tools: ["bash", "read", "edit", "write", "unknown"] }),
+    profile: selected,
     onProgress() {},
   });
 
-  assert.equal(argumentValue(invocation().args, "--tools"), "bash,read,edit,write");
+  assert.equal(
+    argumentValue(invocation().args, "--tools"),
+    getLaunchToolAllowlist(selected, "write").join(","),
+  );
+  assert.equal(argumentValue(invocation().args, "--tools"), "read,bash,edit,write");
   child.close();
   await running.result;
 });

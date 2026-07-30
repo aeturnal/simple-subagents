@@ -4,11 +4,10 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { JsonLineParser } from "./json-stream.js";
+import { getLaunchToolAllowlist } from "./profile-capabilities.js";
 import { CAPTURED_TEXT_MAX_BYTES, truncateUtf8 } from "./output.js";
 import type { AgentProfile, JobRequest, ProgressItem, TextTruncation, UsageStats } from "./types.js";
 
-const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
-const WRITE_TOOLS = new Set(["read", "grep", "find", "ls", "bash", "edit", "write"]);
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 export interface ProcessRunOptions {
@@ -102,12 +101,6 @@ const resolveModel = (profile: AgentProfile, parentModel?: string, thinkingLevel
   return `${model}:${thinkingLevel}`;
 };
 
-const getTools = (profile: AgentProfile, writeAccess: boolean): string[] => {
-  const permitted = writeAccess ? WRITE_TOOLS : READ_ONLY_TOOLS;
-  if (profile.name === "generic") return [...permitted];
-  return (profile.tools ?? []).filter((tool) => permitted.has(tool));
-};
-
 const getPiInvocation = (args: string[], fileExists: (path: string) => boolean = existsSync): { command: string; args: string[] } => {
   const currentScript = process.argv[1];
   if (currentScript && !currentScript.startsWith("/$bunfs/root/") && fileExists(currentScript)) {
@@ -149,7 +142,8 @@ export class PiProcessRunner implements ProcessRunner {
     const args = ["--mode", "json", "-p", "--no-session"];
     if (model) args.push("--model", model);
 
-    const tools = getTools(options.profile, options.request.writeAccess);
+    const accessMode = options.request.writeAccess ? "write" : "read-only";
+    const tools = getLaunchToolAllowlist(options.profile, accessMode);
     if (tools.length > 0) args.push("--tools", tools.join(","));
     else if (options.profile.name !== "generic") args.push("--no-tools");
 
