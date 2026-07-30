@@ -26,6 +26,30 @@ export function sanitizePublicText(value: string, maxBytes: number): string {
   return truncateUtf8(normalized, maxBytes).text.trim();
 }
 
+export function formatUnknownProfileDiagnostic(
+  unknownName: string,
+  privateProfiles: readonly AgentProfile[],
+): string {
+  const unknown = sanitizePublicText(unknownName, 128);
+  const prefix = `Unknown agent profile: ${unknown}. Available profiles: `;
+  const names: string[] = [];
+
+  for (const profile of privateProfiles) {
+    const name = sanitizePublicText(profile.name, 128);
+    const nextNames = [...names, name];
+    const allIncluded = nextNames.length === privateProfiles.length;
+    const reservedOmitted = allIncluded ? 0 : privateProfiles.length;
+    const suffix = reservedOmitted > 0 ? `, ${reservedOmitted} profile names omitted.` : ".";
+    const candidate = `${prefix}${nextNames.join(", ")}${suffix}`;
+    if (Buffer.byteLength(candidate, "utf8") > PUBLIC_DISCOVERY_MAX_BYTES) break;
+    names.push(name);
+  }
+
+  const omitted = privateProfiles.length - names.length;
+  const suffix = omitted > 0 ? `, ${omitted} profile names omitted.` : ".";
+  return `${prefix}${names.join(", ")}${suffix}`;
+}
+
 export function toPublicAgentProfile(profile: AgentProfile): PublicAgentProfile {
   const readOnlyToolAllowlist = getLaunchToolAllowlist(profile, "read-only")
     .map((tool) => sanitizePublicText(tool, 128));

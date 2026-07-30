@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   PUBLIC_DISCOVERY_MAX_BYTES,
   buildPublicAgentDiscovery,
+  formatUnknownProfileDiagnostic,
   sanitizePublicText,
   toPublicAgentProfile,
 } from "../src/profile-discovery.ts";
@@ -154,6 +155,24 @@ test("keeps a decimal-width boundary record when its exact omission count fits",
     Buffer.byteLength(nextContent, "utf8") > PUBLIC_DISCOVERY_MAX_BYTES
       || Buffer.byteLength(nextDetailsText, "utf8") > PUBLIC_DISCOVERY_MAX_BYTES,
   );
+});
+
+test("unknown-profile diagnostics sanitize names and bound the available list", () => {
+  const profiles = Array.from({ length: 600 }, (_, index): AgentProfile => ({
+    name: `agent-${index}\n${"😀".repeat(50)}`,
+    description: "private description",
+    systemPrompt: `SECRET-${index}`,
+    source: index === 0 ? "builtin" : "user",
+  }));
+  profiles[0] = { name: "generic", description: "Generic coding agent", systemPrompt: "secret", source: "builtin" };
+
+  const diagnostic = formatUnknownProfileDiagnostic(` reveiwer\n\u0000${"界".repeat(100)} `, profiles);
+
+  assert.ok(Buffer.byteLength(diagnostic, "utf8") <= PUBLIC_DISCOVERY_MAX_BYTES);
+  assert.match(diagnostic, /^Unknown agent profile: reveiwer /);
+  assert.match(diagnostic, /Available profiles: generic, agent-1 /);
+  assert.match(diagnostic, /profile names omitted\.$/);
+  assert.doesNotMatch(diagnostic, /[\u0000-\u001f\u007f]|SECRET|�/);
 });
 
 test("bounds both discovery representations using one whole-record prefix", () => {
