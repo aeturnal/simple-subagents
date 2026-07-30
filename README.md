@@ -25,7 +25,7 @@ Or load the extension for a single run without installing it:
 pi -e ./src/index.ts
 ```
 
-Ask Pi naturally: “start three parallel subagents to review the tests, dependencies, and docs”; “show subagent status”; “cancel job-2”; or “collect job-1 and job-3.” `/subagents` opens the interactive inbox: arrows select, Enter inspects, `c` cancels, `x` collects, `d` discards, and Escape closes.
+Ask Pi naturally: “start three parallel subagents to review the tests, dependencies, and docs”; “show subagent status”; “wait for job-1 and job-3”; “cancel job-2”; or “collect job-1 and job-3.” `/subagents` opens the interactive inbox: arrows select, Enter inspects, `c` cancels, `x` collects, `d` discards, and Escape closes.
 
 Completion notices are availability hints: a notified result may already have been collected or discarded by the time Pi processes the follow-up. Pi checks the job's current state and explicitly calls the normal collection tool only when an uncollected result is needed for the active task; otherwise no action or extra confirmation turn is required. A missed notice does not remove the result—uncollected results remain available through status and `/subagents` for the rest of the session.
 
@@ -52,6 +52,8 @@ Jobs are read-only by default. The parent model can explicitly request write acc
 `confirmWrites` defaults to `false`. Even when write access is requested, give concurrent writers non-overlapping work: all subagents share the same workspace, so overlapping writes can conflict.
 
 ## Limits and lifecycle
+
+`subagent_wait` is a short, event-driven pause for jobs expected to finish soon when no useful parent work can proceed. The parent cannot answer concurrently while the tool is waiting, so each call defaults to 15 seconds and lasts at most 30 seconds. A timeout returns current states without cancelling work; do not immediately wait again—continue other work or return control. Aborting the parent turn does not cancel subagents.
 
 At most four jobs run at once, and a start or control batch accepts at most eight jobs. Collected output is capped at 50 KB. Cancel queued or running work from the tools or dashboard; session shutdown also cancels queued and active jobs before the extension closes.
 
