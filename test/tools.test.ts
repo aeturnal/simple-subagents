@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Check } from "typebox/value";
 import {
   ControlParams,
   StartParams,
   StatusParams,
+  WaitParams,
   controlJobs,
   registerSubagentTools,
   startJobs,
   statusJobs,
+  waitJobs,
   type ToolServices,
   type WriteConfirmation,
 } from "../src/tools.ts";
@@ -182,6 +185,110 @@ test("statusJobs returns an ordinary diagnostic for an unknown ID", async () => 
   assert.match(text(result), /Unknown job: missing/);
   assert.deepEqual(result.details.jobs, []);
   assert.deepEqual(result.details.diagnostics, ["Unknown job: missing"]);
+});
+
+test("wait schema bounds IDs, condition, and timeout", () => {
+  const schema = WaitParams as unknown as {
+    properties: {
+      ids: { minItems: number; maxItems: number };
+      until: { enum: string[]; default: string };
+      timeoutMs: { type: string; minimum: number; maximum: number; default: number };
+    };
+  };
+
+  assert.equal(schema.properties.ids.minItems, 1);
+  assert.equal(schema.properties.ids.maxItems, 8);
+  assert.deepEqual(schema.properties.until.enum, ["any", "all"]);
+  assert.equal(schema.properties.until.default, "all");
+  assert.equal(schema.properties.timeoutMs.type, "integer");
+  assert.equal(schema.properties.timeoutMs.minimum, 100);
+  assert.equal(schema.properties.timeoutMs.maximum, 30_000);
+  assert.equal(schema.properties.timeoutMs.default, 15_000);
+  assert.equal(Check(WaitParams, { ids: ["job-1"], timeoutMs: 100 }), true);
+  assert.equal(Check(WaitParams, { ids: ["job-1"], timeoutMs: 30_000 }), true);
+  assert.equal(Check(WaitParams, { ids: ["job-1"], timeoutMs: 99 }), false);
+  assert.equal(Check(WaitParams, { ids: ["job-1"], timeoutMs: 30_001 }), false);
+  assert.equal(Check(WaitParams, { ids: ["job-1"], timeoutMs: 100.5 }), false);
+});
+
+test("waitJobs applies defaults and returns only state snapshots", async () => {
+  const { services, runner } = createServices();
+  await startJobs({ tasks: [{ task: "secret task" }] }, services, {} as never);
+  runner.started[0]?.resolve(completed("secret output"));
+  await runner.flush();
+
+  const result = await waitJobs({ ids: ["job-1"] }, services);
+
+  assert.equal(text(result), "Wait completed: job-1 (completed).");
+  assert.ok("outcome" in result.details);
+  assert.deepEqual(result.details, {
+    operation: "wait",
+    outcome: "completed",
+    until: "all",
+    timeoutMs: 15_000,
+    elapsedMs: result.details.elapsedMs,
+    jobs: [{ id: "job-1", state: "completed" }],
+  });
+  const serialized = JSON.stringify(result);
+  assert.doesNotMatch(serialized, /secret task|secret output|progress|stderr|profile|usage/);
+});
+
+test("waitJobs returns atomic diagnostics for duplicate and unknown IDs", async () => {
+  const { services } = createServices();
+  await startJobs({ tasks: [{ task: "one" }] }, services, {} as never);
+
+  const duplicate = await waitJobs({ ids: ["job-1", "job-1"] }, services);
+  const unknown = await waitJobs({ ids: ["job-1", "missing"] }, services);
+
+  assert.equal(text(duplicate), "Duplicate job ID: job-1");
+  assert.deepEqual(duplicate.details, {
+    jobs: [],
+    diagnostics: ["Duplicate job ID: job-1"],
+    operation: "wait",
+  });
+  assert.equal(text(unknown), "Unknown job: missing");
+  assert.deepEqual(unknown.details, {
+    jobs: [],
+    diagnostics: ["Unknown job: missing"],
+    operation: "wait",
+  });
+});
+
+test("waitJobs formats timeout guidance and compact abort text", async () => {
+  const timedOutManager = {
+    waitFor: async () => ({
+      operation: "wait" as const,
+      outcome: "timed_out" as const,
+      until: "any" as const,
+      timeoutMs: 100,
+      elapsedMs: 100,
+      jobs: [{ id: "job-1", state: "running" as const }],
+    }),
+  } as unknown as JobManager;
+  const timedOut = await waitJobs(
+    { ids: ["job-1"], until: "any", timeoutMs: 100 },
+    { manager: timedOutManager } as ToolServices,
+  );
+  assert.equal(
+    text(timedOut),
+    "Wait timed out after 100 ms: job-1 (running).\nDo not wait again immediately; continue other work or return control.",
+  );
+
+  const abortedManager = {
+    waitFor: async () => ({
+      operation: "wait" as const,
+      outcome: "aborted" as const,
+      until: "all" as const,
+      timeoutMs: 30_000,
+      elapsedMs: 5,
+      jobs: [{ id: "job-1", state: "running" as const }],
+    }),
+  } as unknown as JobManager;
+  const aborted = await waitJobs(
+    { ids: ["job-1"], timeoutMs: 30_000 },
+    { manager: abortedManager } as ToolServices,
+  );
+  assert.equal(text(aborted), "Wait aborted: job-1 (running).");
 });
 
 test("controlJobs handles multi-ID cancellation and leaves unknown IDs as diagnostics", async () => {

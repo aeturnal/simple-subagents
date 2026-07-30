@@ -2,7 +2,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
-import { JobManager } from "./job-manager.js";
+import { JobManager, type WaitJobStatus, type WaitResult, type WaitUntil } from "./job-manager.js";
 import { capCollectedPayload, formatCollectedResult } from "./output.js";
 import type { AgentProfile, Job, JobRequest } from "./types.js";
 
@@ -21,10 +21,16 @@ export const ControlParams = Type.Object({
   action: StringEnum(["cancel", "collect", "discard"] as const),
   ids: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }),
 });
+export const WaitParams = Type.Object({
+  ids: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }),
+  until: Type.Optional(StringEnum(["any", "all"] as const, { default: "all" })),
+  timeoutMs: Type.Optional(Type.Integer({ minimum: 100, maximum: 30_000, default: 15_000 })),
+});
 
 export type StartInput = Static<typeof StartParams>;
 export type StatusInput = Static<typeof StatusParams>;
 export type ControlInput = Static<typeof ControlParams>;
+export type WaitInput = Static<typeof WaitParams>;
 export type WriteConfirmation = "approved" | "declined" | "unavailable";
 
 export interface ToolServices {
@@ -37,12 +43,14 @@ export interface ToolServices {
 export interface ToolDetails {
   jobs: Job[];
   diagnostics: string[];
-  operation?: "start" | "status" | "cancel" | "collect" | "discard";
+  operation?: "start" | "status" | "wait" | "cancel" | "collect" | "discard";
 }
+
+export type WaitToolDetails = WaitResult;
 
 export interface ToolResponse {
   content: Array<{ type: "text"; text: string }>;
-  details: ToolDetails;
+  details: ToolDetails | WaitToolDetails;
 }
 
 const response = (
@@ -50,7 +58,7 @@ const response = (
   jobs: readonly Job[] = [],
   diagnostics: string[] = [],
   operation?: ToolDetails["operation"],
-): ToolResponse => ({
+): ToolResponse & { details: ToolDetails } => ({
   content: [{ type: "text", text: content }],
   details: { jobs: [...jobs], diagnostics, operation },
 });
@@ -64,7 +72,7 @@ const toRequest = (task: StartInput["tasks"][number]): JobRequest => ({
 
 const summary = (jobs: readonly Job[]): string => jobs.map((job) => `${job.id} (${job.state})`).join(", ");
 
-export async function startJobs(input: StartInput, services: ToolServices, ctx: ExtensionContext): Promise<ToolResponse> {
+export async function startJobs(input: StartInput, services: ToolServices, ctx: ExtensionContext): Promise<ToolResponse & { details: ToolDetails }> {
   if (input.tasks.length > 8) return response("A start batch accepts at most 8 jobs.", [], ["A start batch accepts at most 8 jobs."], "start");
 
   const requests = input.tasks.map(toRequest);
@@ -89,7 +97,7 @@ export async function startJobs(input: StartInput, services: ToolServices, ctx: 
   return response(`Started ${jobs.length} job${jobs.length === 1 ? "" : "s"}: ${summary(jobs)}.`, jobs, [], "start");
 }
 
-export async function statusJobs(input: StatusInput, services: ToolServices): Promise<ToolResponse> {
+export async function statusJobs(input: StatusInput, services: ToolServices): Promise<ToolResponse & { details: ToolDetails }> {
   if (input.id) {
     const job = services.manager.get(input.id);
     if (!job) return response(`Unknown job: ${input.id}`, [], [`Unknown job: ${input.id}`], "status");
@@ -100,7 +108,40 @@ export async function statusJobs(input: StatusInput, services: ToolServices): Pr
   return response(jobs.length === 0 ? "No background subagent jobs." : `Jobs: ${summary(jobs)}`, jobs, [], "status");
 }
 
-export async function controlJobs(input: ControlInput, services: ToolServices): Promise<ToolResponse> {
+const waitSummary = (jobs: readonly WaitJobStatus[]): string =>
+  jobs.map((job) => `${job.id} (${job.state})`).join(", ");
+
+const expectedWaitDiagnostic = (error: unknown): string | undefined => {
+  if (!(error instanceof Error)) return undefined;
+  return /^(Unknown job|Duplicate job ID): /.test(error.message) ? error.message : undefined;
+};
+
+export async function waitJobs(
+  input: WaitInput,
+  services: ToolServices,
+  signal?: AbortSignal,
+): Promise<ToolResponse> {
+  const until: WaitUntil = input.until ?? "all";
+  const timeoutMs = input.timeoutMs ?? 15_000;
+  let result: WaitResult;
+  try {
+    result = await services.manager.waitFor({ ids: input.ids, until, timeoutMs, signal });
+  } catch (error) {
+    const diagnostic = expectedWaitDiagnostic(error);
+    if (!diagnostic) throw error;
+    return response(diagnostic, [], [diagnostic], "wait");
+  }
+
+  const jobs = waitSummary(result.jobs);
+  const content = result.outcome === "completed"
+    ? `Wait completed: ${jobs}.`
+    : result.outcome === "timed_out"
+      ? `Wait timed out after ${timeoutMs} ms: ${jobs}.\nDo not wait again immediately; continue other work or return control.`
+      : `Wait aborted: ${jobs}.`;
+  return { content: [{ type: "text", text: content }], details: result };
+}
+
+export async function controlJobs(input: ControlInput, services: ToolServices): Promise<ToolResponse & { details: ToolDetails }> {
   const jobs: Job[] = [];
   const diagnostics: string[] = [];
   const collected: Job[] = [];
@@ -148,7 +189,7 @@ const description = [
   "Concurrent writable jobs should receive non-overlapping work.",
 ].join(" ");
 
-const renderToolResult = (result: ToolResponse, expanded: boolean, theme: { fg(color: string, text: string): string }): string => {
+const renderToolResult = (result: ToolResponse & { details: ToolDetails }, expanded: boolean, theme: { fg(color: string, text: string): string }): string => {
   const { jobs, diagnostics, operation } = result.details;
   const content = result.content.find((part) => part.type === "text")?.text ?? "";
   const icon = (state: Job["state"]): string => {
@@ -180,7 +221,7 @@ export function registerSubagentTools(pi: ExtensionAPI, services: ToolServices):
     parameters: StartParams,
     execute: async (_id, input, _signal, _update, ctx) => startJobs(input, services, ctx),
     renderCall: (input, theme) => new Text(theme.fg("toolTitle", `subagent_start ${input.tasks.length} job${input.tasks.length === 1 ? "" : "s"}`), 0, 0),
-    renderResult: (result, { expanded }, theme) => new Text(renderToolResult(result as ToolResponse, expanded, theme), 0, 0),
+    renderResult: (result, { expanded }, theme) => new Text(renderToolResult(result as ToolResponse & { details: ToolDetails }, expanded, theme), 0, 0),
   });
   pi.registerTool({
     name: "subagent_status",
@@ -189,7 +230,7 @@ export function registerSubagentTools(pi: ExtensionAPI, services: ToolServices):
     parameters: StatusParams,
     execute: async (_id, input) => statusJobs(input, services),
     renderCall: (input, theme) => new Text(theme.fg("toolTitle", input.id ? `subagent_status ${input.id}` : "subagent_status"), 0, 0),
-    renderResult: (result, { expanded }, theme) => new Text(renderToolResult(result as ToolResponse, expanded, theme), 0, 0),
+    renderResult: (result, { expanded }, theme) => new Text(renderToolResult(result as ToolResponse & { details: ToolDetails }, expanded, theme), 0, 0),
   });
   pi.registerTool({
     name: "subagent_control",
@@ -198,6 +239,6 @@ export function registerSubagentTools(pi: ExtensionAPI, services: ToolServices):
     parameters: ControlParams,
     execute: async (_id, input) => controlJobs(input, services),
     renderCall: (input, theme) => new Text(theme.fg("toolTitle", `subagent_control ${input.action} ${input.ids.join(", ")}`), 0, 0),
-    renderResult: (result, { expanded }, theme) => new Text(renderToolResult(result as ToolResponse, expanded, theme), 0, 0),
+    renderResult: (result, { expanded }, theme) => new Text(renderToolResult(result as ToolResponse & { details: ToolDetails }, expanded, theme), 0, 0),
   });
 }
