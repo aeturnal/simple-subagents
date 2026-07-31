@@ -1,6 +1,6 @@
 {
   "name": "simple-subagents",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Lightweight background subagents for Pi",
   "type": "module",
   "engines": { "node": ">=22.19.0" },
