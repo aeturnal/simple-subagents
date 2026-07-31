@@ -67,3 +67,48 @@ integrationTest("real Pi reads a file with the generic read-only profile", { tim
   assert.notEqual(result.output, "");
   assert.equal(result.output, answer, `Pi output: ${JSON.stringify(result.output)}\nPi stderr: ${result.stderr}`);
 });
+
+integrationTest("real Pi accepts explicit thinking over a model-pattern suffix", { timeout: 120_000 }, async (t) => {
+  const modelPattern = process.env.SIMPLE_SUBAGENTS_INTEGRATION_MODEL_WITH_THINKING;
+  if (!modelPattern) {
+    t.skip("set SIMPLE_SUBAGENTS_INTEGRATION_MODEL_WITH_THINKING to an authenticated Pi model pattern ending in a thinking suffix");
+    return;
+  }
+
+  const cwd = await mkdtemp(join(tmpdir(), "simple-subagents-thinking-integration-"));
+  const profile = (await discoverAgents(join(cwd, "agents"))).agents.find((entry) => entry.name === "generic");
+  assert.ok(profile);
+  const request = {
+    task: "Reply with exactly: precedence-ok",
+    agent: "generic",
+    writeAccess: false,
+    thinkingLevel: "low" as const,
+  };
+  let invocation: { command: string; args: string[] } | undefined;
+  const runner = new PiProcessRunner({
+    fileExists: () => false,
+    spawnProcess(command, args, options) {
+      invocation = { command, args: [...args] };
+      return spawn(command, args, options) as unknown as SpawnedProcess;
+    },
+  });
+  const running = runner.run({
+    cwd,
+    request,
+    profile,
+    launchOptions: resolveLaunchOptions(request, { ...profile, model: modelPattern }, {}),
+    onProgress() {},
+  });
+  t.after(async () => {
+    await running.cancel();
+    await running.result;
+    await rm(cwd, { recursive: true, force: true });
+  });
+
+  assert.ok(invocation);
+  assert.equal(invocation.args[invocation.args.indexOf("--model") + 1], modelPattern);
+  assert.equal(invocation.args[invocation.args.indexOf("--thinking") + 1], "low");
+  const result = await running.result;
+  assert.equal(result.exitCode, 0, `Pi stderr: ${result.stderr}`);
+  assert.equal(result.output.trim(), "precedence-ok");
+});
