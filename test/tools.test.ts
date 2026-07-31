@@ -403,7 +403,7 @@ test("controlJobs formats the terminal snapshot before collecting it", async () 
   assert.match(text(result), /# Subagent result: job-1/);
   assert.match(text(result), /Status: completed/);
   assert.match(text(result), /secret final answer/);
-  assert.match(text(result), /Model: test-model/);
+  assert.match(text(result), /Reported model: test-model/);
   assert.match(text(result), /Usage: input 1, output 2, cache read 3, cache write 4, cost 0.5, turns 1/);
   assert.equal(result.details.jobs[0]?.state, "collected");
   assert.equal(services.manager.get("job-1")?.state, "collected");

@@ -35,6 +35,18 @@ const captureNotice = (label: string, truncation?: { originalBytes: number; kept
 const usageLine = (job: Job): string =>
   `- Usage: input ${job.usage.input}, output ${job.usage.output}, cache read ${job.usage.cacheRead}, cache write ${job.usage.cacheWrite}, cost ${job.usage.cost}, turns ${job.usage.turns}`;
 
+const thinkingSelection = (job: Job): string | undefined => {
+  if (job.launchThinkingLevel) {
+    const source = job.launchThinkingSource === "job" ? "job override"
+      : job.launchThinkingSource === "parent" ? "parent session"
+        : "legacy profile/parent behavior";
+    return `${job.launchThinkingLevel} (${source})`;
+  }
+  if (job.launchThinkingSource === "model_or_pi_default") return "model or Pi default";
+  if (job.launchThinkingSource === "legacy") return "legacy profile/parent behavior";
+  return undefined;
+};
+
 export const capCollectedPayload = (content: string): string => {
   const originalBytes = Buffer.byteLength(content, "utf8");
   if (originalBytes <= COLLECTED_OUTPUT_MAX_BYTES) return content;
@@ -57,7 +69,9 @@ export const formatCollectedResult = (job: Job): string => {
     `- Agent: ${job.profile.name}`,
     `- Access: ${access}`,
     `- Task: ${job.request.task}`,
-    ...(job.model ? [`- Model: ${job.model}`] : []),
+    ...(job.launchModel ? [`- Launch model: ${job.launchModel}`] : []),
+    ...(thinkingSelection(job) ? [`- Launch thinking: ${thinkingSelection(job)}`] : []),
+    ...(job.model ? [`- Reported model: ${job.model}`] : []),
     usageLine(job),
   ];
   const latestPartial = [...job.progress].reverse().find((item) => item.type === "text");
