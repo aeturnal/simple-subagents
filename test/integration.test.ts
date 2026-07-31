@@ -76,6 +76,16 @@ integrationTest("real Pi accepts explicit thinking over a model-pattern suffix",
   }
 
   const cwd = await mkdtemp(join(tmpdir(), "simple-subagents-thinking-integration-"));
+  let running: ReturnType<PiProcessRunner["run"]> | undefined;
+
+  t.after(async () => {
+    if (running) {
+      await running.cancel();
+      await running.result;
+    }
+    await rm(cwd, { recursive: true, force: true });
+  });
+
   const profile = (await discoverAgents(join(cwd, "agents"))).agents.find((entry) => entry.name === "generic");
   assert.ok(profile);
   const request = {
@@ -92,17 +102,12 @@ integrationTest("real Pi accepts explicit thinking over a model-pattern suffix",
       return spawn(command, args, options) as unknown as SpawnedProcess;
     },
   });
-  const running = runner.run({
+  running = runner.run({
     cwd,
     request,
     profile,
     launchOptions: resolveLaunchOptions(request, { ...profile, model: modelPattern }, {}),
     onProgress() {},
-  });
-  t.after(async () => {
-    await running.cancel();
-    await running.result;
-    await rm(cwd, { recursive: true, force: true });
   });
 
   assert.ok(invocation);
