@@ -54,7 +54,7 @@ export function installCompletionNotifier(pi: ExtensionAPI, manager: JobManager,
         content: `${summary}\nCheck their current state. Collect any still-uncollected results needed by the active task; otherwise no action is required.`,
         display: true,
         details: { jobIds },
-      }, { deliverAs: "followUp", triggerTurn: true });
+      }, { deliverAs: "steer", triggerTurn: true });
     } catch {
       // Delivery is best-effort; jobs remain available through status and the dashboard.
     }

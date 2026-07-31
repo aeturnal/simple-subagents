@@ -659,7 +659,7 @@ test("registered tools expose strict schema boundaries and required guidance", (
   assert.match(pi.tools.get("subagent_wait")?.description ?? "", /at most 30 seconds/i);
 });
 
-test("completion notices debounce real terminal transitions at 100 ms, including cancellation, without leaking output", async () => {
+test("completion notices steer real terminal transitions at the next turn boundary without leaking output", async () => {
   const pi = new FakePi();
   const timers = new FakeTimers();
   const runner = new ControlledRunner();
@@ -687,7 +687,7 @@ test("completion notices debounce real terminal transitions at 100 ms, including
   );
   assert.doesNotMatch(pi.messages[0]?.content ?? "", /secret/);
   assert.doesNotMatch(pi.messages[0]?.content ?? "", /ask the user/i);
-  assert.deepEqual(pi.messageOptions[0], { deliverAs: "followUp", triggerTurn: true });
+  assert.deepEqual(pi.messageOptions[0], { deliverAs: "steer", triggerTurn: true });
 
   runner.started[2]?.resolve(completed("third secret"));
   await runner.flush();
