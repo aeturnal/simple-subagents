@@ -31,7 +31,7 @@ const profile: AgentProfile = {
 };
 
 const profiles = new Map([[profile.name, profile]]);
-const defaults = { cwd: "/workspace", parentModel: "parent-model", thinkingLevel: "high" };
+const defaults = { cwd: "/workspace", parentModel: "parent-model", thinkingLevel: "high" as const };
 
 const makeRequests = (count: number): JobRequest[] =>
   Array.from({ length: count }, (_, index) => ({ task: `Task ${index + 1}`, agent: "reviewer", writeAccess: false }));
@@ -236,8 +236,88 @@ test("assigns stable increasing IDs and passes resolved process options", () => 
   assert.equal(second?.id, "job-2");
   assert.equal(first?.createdAt, 100);
   assert.equal(runner.started[0]?.options.cwd, "/request");
-  assert.equal(runner.started[0]?.options.parentModel, "parent-model");
-  assert.equal(runner.started[0]?.options.thinkingLevel, "high");
+  assert.deepEqual(runner.started[0]?.options.launchOptions, {
+    path: "legacy",
+    modelArgument: "parent-model:high",
+    thinkingArgument: undefined,
+    launchModel: "parent-model:high",
+    launchThinkingLevel: "high",
+    launchThinkingSource: "legacy",
+    diagnostics: [],
+  });
+});
+
+test("stores launch selections immediately without populating the reported model", () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  const [job] = manager.enqueue(
+    [{ ...makeRequests(1)[0]!, model: "ollama/llama3.1:8b", thinkingLevel: "low" }],
+    profiles,
+    defaults,
+  );
+
+  assert.deepEqual({
+    launchModel: job?.launchModel,
+    launchThinkingLevel: job?.launchThinkingLevel,
+    launchThinkingSource: job?.launchThinkingSource,
+    reportedModel: job?.model,
+  }, {
+    launchModel: "ollama/llama3.1:8b",
+    launchThinkingLevel: "low",
+    launchThinkingSource: "job",
+    reportedModel: undefined,
+  });
+  assert.equal(runner.started[0]?.options.profile.systemPrompt, profile.systemPrompt);
+  assert.equal(runner.started[0]?.options.request.writeAccess, false);
+});
+
+test("rejects one invalid override before creating or starting any batch job", () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  const requests = [
+    { ...makeRequests(1)[0]!, model: "openai/gpt-5" },
+    { ...makeRequests(1)[0]!, task: "invalid", model: " bad" },
+  ];
+
+  assert.throws(() => manager.enqueue(requests, profiles, defaults), /non-empty trimmed string/i);
+  assert.deepEqual(manager.list(), []);
+  assert.equal(runner.started.length, 0);
+
+  const [next] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.equal(next?.id, "job-1");
+});
+
+test("keeps launch model when Pi later reports a different resolved model", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  const [job] = manager.enqueue([{ ...makeRequests(1)[0]!, model: "anthropic/sonnet" }], profiles, defaults);
+  assert.ok(job);
+
+  runner.complete(0, { ...successfulResult("done"), model: "anthropic/claude-sonnet-4-5-20250929" });
+  await runner.flush();
+
+  assert.equal(manager.get(job.id)?.launchModel, "anthropic/sonnet");
+  assert.equal(manager.get(job.id)?.model, "anthropic/claude-sonnet-4-5-20250929");
+});
+
+test("keeps override selections and failures isolated between sibling jobs", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner, concurrency: 2 });
+  const jobs = manager.enqueue([
+    { ...makeRequests(1)[0]!, task: "unavailable", model: "missing/model", thinkingLevel: "low" },
+    { ...makeRequests(1)[0]!, task: "available", model: "openai/gpt-5", thinkingLevel: "high" },
+  ], profiles, defaults);
+
+  assert.deepEqual(jobs.map((job) => [job.launchModel, job.launchThinkingLevel]), [
+    ["missing/model", "low"],
+    ["openai/gpt-5", "high"],
+  ]);
+  runner.complete(0, failedResult({ stderr: "model unavailable" }));
+  runner.complete(1, successfulResult("sibling complete"));
+  await runner.flush();
+
+  assert.equal(manager.get(jobs[0]!.id)?.state, "failed");
+  assert.equal(manager.get(jobs[1]!.id)?.state, "completed");
 });
 
 test("counts a synchronous runner startup reservation before re-entrant enqueue", async () => {

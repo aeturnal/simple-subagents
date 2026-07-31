@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { JsonLineParser } from "./json-stream.js";
+import type { LaunchOptions } from "./launch-options.js";
 import { getLaunchToolAllowlist } from "./profile-capabilities.js";
 import { CAPTURED_TEXT_MAX_BYTES, truncateUtf8 } from "./output.js";
 import type { AgentProfile, JobRequest, ProgressItem, TextTruncation, UsageStats } from "./types.js";
@@ -16,6 +17,7 @@ export interface ProcessRunOptions {
   profile: AgentProfile;
   parentModel?: string;
   thinkingLevel?: string;
+  launchOptions?: LaunchOptions;
   onProgress(item: ProgressItem): void;
 }
 
