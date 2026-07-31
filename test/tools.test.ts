@@ -988,11 +988,34 @@ test("runtime loads config and profiles, surfaces diagnostics, confirms writable
   assert.deepEqual(runner.started.map(({ options }) => ({
     cwd: options.cwd,
     profile: options.profile.name,
-    parentModel: options.parentModel,
-    thinkingLevel: options.thinkingLevel,
+    launchOptions: options.launchOptions,
   })), [
-    { cwd: "/workspace", profile: "writer", parentModel: "parent/model", thinkingLevel: "high" },
-    { cwd: "/workspace", profile: "writer", parentModel: "parent/model", thinkingLevel: "high" },
+    {
+      cwd: "/workspace",
+      profile: "writer",
+      launchOptions: {
+        path: "legacy",
+        modelArgument: "parent/model:high",
+        thinkingArgument: undefined,
+        launchModel: "parent/model:high",
+        launchThinkingLevel: "high",
+        launchThinkingSource: "legacy",
+        diagnostics: [],
+      },
+    },
+    {
+      cwd: "/workspace",
+      profile: "writer",
+      launchOptions: {
+        path: "legacy",
+        modelArgument: "parent/model:high",
+        thinkingArgument: undefined,
+        launchModel: "parent/model:high",
+        launchThinkingLevel: "high",
+        launchThinkingSource: "legacy",
+        diagnostics: [],
+      },
+    },
   ]);
 
   const shuttingDown = pi.emit("session_shutdown", { reason: "reload" }, fakeContext({ hasUI: true }, pi));

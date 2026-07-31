@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { discoverAgents } from "../src/agents.ts";
+import { resolveLaunchOptions } from "../src/launch-options.ts";
 import { PiProcessRunner, type SpawnOptions, type SpawnedProcess } from "../src/process-runner.ts";
 
 const integrationTest = process.env.SIMPLE_SUBAGENTS_INTEGRATION === "1" ? test : test.skip;
@@ -37,14 +38,16 @@ integrationTest("real Pi reads a file with the generic read-only profile", { tim
       return spawn(command, args, options) as unknown as SpawnedProcess;
     },
   });
+  const request = {
+    task: "Read answer.txt and return its exact contents.",
+    agent: "generic",
+    writeAccess: false,
+  };
   running = runner.run({
     cwd,
-    request: {
-      task: "Read answer.txt and return its exact contents.",
-      agent: "generic",
-      writeAccess: false,
-    },
+    request,
     profile: generic,
+    launchOptions: resolveLaunchOptions(request, generic, {}),
     onProgress() {},
   });
   void running.result.then(() => {

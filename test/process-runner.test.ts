@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import test from "node:test";
-import { getLaunchToolAllowlist } from "../src/profile-capabilities.ts";
-import { PiProcessRunner } from "../src/process-runner.ts";
+import { resolveLaunchOptions } from "../src/launch-options.ts";
 import { CAPTURED_TEXT_MAX_BYTES } from "../src/output.ts";
+import { getLaunchToolAllowlist } from "../src/profile-capabilities.ts";
+import { PiProcessRunner, type ProcessRunOptions } from "../src/process-runner.ts";
 import type { AgentProfile, JobRequest, ProgressItem } from "../src/types.ts";
 
 class FakeChildProcess extends EventEmitter {
@@ -36,6 +37,18 @@ const profile = (overrides: Partial<AgentProfile> = {}): AgentProfile => ({
   ...overrides,
 });
 
+const runOptions = (overrides: Partial<ProcessRunOptions> = {}): ProcessRunOptions => {
+  const nextRequest = overrides.request ?? request();
+  const nextProfile = overrides.profile ?? profile({ systemPrompt: "" });
+  return {
+    cwd: overrides.cwd ?? "/workspace",
+    request: nextRequest,
+    profile: nextProfile,
+    launchOptions: overrides.launchOptions ?? resolveLaunchOptions(nextRequest, nextProfile, {}),
+    onProgress: overrides.onProgress ?? (() => {}),
+  };
+};
+
 const spawnedRunner = (child = new FakeChildProcess(), fileExists?: (path: string) => boolean) => {
   let command = "";
   let args: string[] = [];
@@ -65,12 +78,12 @@ const argumentValue = (args: string[], name: string): string | undefined => {
 test("launches Pi without a shell using the current script and generic read-only tools", async () => {
   const { child, runner, invocation } = spawnedRunner();
 
-  const running = runner.run({
+  const running = runner.run(runOptions({
     cwd: "/workspace",
     request: request(false),
     profile: profile({ name: "generic", source: "builtin", tools: ["bash"] }),
     onProgress() {},
-  });
+  }));
   const actual = invocation();
 
   assert.equal(actual.command, process.execPath);
@@ -93,7 +106,7 @@ test("falls back to the pi command when the current script is unavailable", asyn
 
   try {
     const { child, runner, invocation } = spawnedRunner();
-    const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} });
+    const running = runner.run(runOptions({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} }));
 
     assert.equal(invocation().command, "pi");
     child.close();
@@ -109,7 +122,7 @@ test("falls back to the pi command for a Bun virtual current script", async () =
 
   try {
     const { child, runner, invocation } = spawnedRunner(new FakeChildProcess(), (path) => path === process.argv[1]);
-    const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} });
+    const running = runner.run(runOptions({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} }));
 
     assert.equal(invocation().command, "pi");
     child.close();
@@ -119,58 +132,79 @@ test("falls back to the pi command for a Bun virtual current script", async () =
   }
 });
 
-test("adds inherited thinking to the selected model but preserves an explicit profile suffix", async () => {
-  const inherited = spawnedRunner();
-  const inheritedRun = inherited.runner.run({
-    cwd: "/workspace",
-    request: request(),
-    profile: profile({ systemPrompt: "" }),
-    parentModel: "openai/gpt-5",
-    thinkingLevel: "high",
-    onProgress() {},
-  });
-  assert.equal(argumentValue(inherited.invocation().args, "--model"), "openai/gpt-5:high");
-  inherited.child.close();
-  await inheritedRun.result;
+test("keeps legacy process arguments byte-for-byte unchanged", async () => {
+  const { child, runner, invocation } = spawnedRunner();
+  const legacyProfile = profile({ systemPrompt: "" });
+  const legacyRequest = request();
+  const running = runner.run(runOptions({
+    request: legacyRequest,
+    profile: legacyProfile,
+    launchOptions: resolveLaunchOptions(legacyRequest, legacyProfile, { parentModel: "ollama/llama3.1:8b", thinkingLevel: "high" }),
+  }));
 
-  const explicit = spawnedRunner();
-  const explicitRun = explicit.runner.run({
-    cwd: "/workspace",
-    request: request(),
-    profile: profile({ model: "anthropic/sonnet:low", systemPrompt: "" }),
-    parentModel: "openai/gpt-5",
-    thinkingLevel: "high",
-    onProgress() {},
-  });
-  assert.equal(argumentValue(explicit.invocation().args, "--model"), "anthropic/sonnet:low");
-  explicit.child.close();
-  await explicitRun.result;
+  assert.deepEqual(invocation().args, [
+    process.argv[1], "--mode", "json", "-p", "--no-session",
+    "--model", "ollama/llama3.1:8b:high", "--no-tools", "Inspect the repository",
+  ]);
+  child.close();
+  await running.result;
 });
 
-test("adds inherited thinking after a colon-bearing model identifier", async () => {
-  const { child, runner, invocation } = spawnedRunner();
-  const running = runner.run({
-    cwd: "/workspace",
-    request: request(),
-    profile: profile({ systemPrompt: "" }),
-    parentModel: "ollama/llama3.1:8b",
-    thinkingLevel: "high",
-    onProgress() {},
-  });
+test("passes opaque override model and explicit thinking as separate arguments", async () => {
+  for (const model of ["anthropic/sonnet:high", "ollama/llama3.1:8b", "vendor/model:real:high"]) {
+    const { child, runner, invocation } = spawnedRunner();
+    const nextRequest = request();
+    const nextProfile = profile({ systemPrompt: "", tools: ["read", "bash"] });
+    const running = runner.run(runOptions({
+      request: nextRequest,
+      profile: nextProfile,
+      launchOptions: {
+        path: "override",
+        modelArgument: model,
+        thinkingArgument: "low",
+        launchModel: model,
+        launchThinkingLevel: "low",
+        launchThinkingSource: "job",
+        diagnostics: [],
+      },
+    }));
 
-  assert.equal(argumentValue(invocation().args, "--model"), "ollama/llama3.1:8b:high");
+    assert.equal(argumentValue(invocation().args, "--model"), model);
+    assert.equal(argumentValue(invocation().args, "--thinking"), "low");
+    assert.equal(argumentValue(invocation().args, "--tools"), "read");
+    child.close();
+    await running.result;
+  }
+});
+
+test("passes thinking without model when child Pi must select its default", async () => {
+  const { child, runner, invocation } = spawnedRunner();
+  const running = runner.run(runOptions({
+    launchOptions: {
+      path: "override",
+      modelArgument: undefined,
+      thinkingArgument: "max",
+      launchModel: undefined,
+      launchThinkingLevel: "max",
+      launchThinkingSource: "job",
+      diagnostics: [],
+    },
+  }));
+
+  assert.equal(argumentValue(invocation().args, "--model"), undefined);
+  assert.equal(argumentValue(invocation().args, "--thinking"), "max");
   child.close();
   await running.result;
 });
 
 test("intersects named read-only profile tools with the read-only permission set", async () => {
   const { child, runner, invocation } = spawnedRunner();
-  const running = runner.run({
+  const running = runner.run(runOptions({
     cwd: "/workspace",
     request: request(false),
     profile: profile({ tools: ["bash", "read", "edit", "write", "unknown"] }),
     onProgress() {},
-  });
+  }));
 
   assert.equal(argumentValue(invocation().args, "--tools"), "read");
   child.close();
@@ -179,12 +213,12 @@ test("intersects named read-only profile tools with the read-only permission set
 
 test("disables Pi default tools for a named profile without a tools list", async () => {
   const { child, runner, invocation } = spawnedRunner();
-  const running = runner.run({
+  const running = runner.run(runOptions({
     cwd: "/workspace",
     request: request(false),
     profile: profile({ tools: undefined }),
     onProgress() {},
-  });
+  }));
 
   assert.ok(invocation().args.includes("--no-tools"));
   assert.equal(argumentValue(invocation().args, "--tools"), undefined);
@@ -194,12 +228,12 @@ test("disables Pi default tools for a named profile without a tools list", async
 
 test("disables Pi default tools when a named read-only profile requests only bash", async () => {
   const { child, runner, invocation } = spawnedRunner();
-  const running = runner.run({
+  const running = runner.run(runOptions({
     cwd: "/workspace",
     request: request(false),
     profile: profile({ tools: ["bash"] }),
     onProgress() {},
-  });
+  }));
 
   assert.ok(invocation().args.includes("--no-tools"));
   assert.equal(argumentValue(invocation().args, "--tools"), undefined);
@@ -210,12 +244,12 @@ test("disables Pi default tools when a named read-only profile requests only bas
 test("permits requested write tools for writable named profiles", async () => {
   const { child, runner, invocation } = spawnedRunner();
   const selected = profile({ tools: ["write", "bash", "read", "edit", "read", "unknown"] });
-  const running = runner.run({
+  const running = runner.run(runOptions({
     cwd: "/workspace",
     request: request(true),
     profile: selected,
     onProgress() {},
-  });
+  }));
 
   assert.equal(
     argumentValue(invocation().args, "--tools"),
@@ -228,12 +262,12 @@ test("permits requested write tools for writable named profiles", async () => {
 
 test("passes a private temporary system prompt file and removes it after close", async () => {
   const { child, runner, invocation } = spawnedRunner();
-  const running = runner.run({
+  const running = runner.run(runOptions({
     cwd: "/workspace",
     request: request(),
     profile: profile({ systemPrompt: "Only report verified findings." }),
     onProgress() {},
-  });
+  }));
   const promptPath = argumentValue(invocation().args, "--append-system-prompt");
 
   assert.ok(promptPath);
@@ -248,7 +282,7 @@ test("passes a private temporary system prompt file and removes it after close",
 test("reduces split assistant events into final output and accumulated usage", async () => {
   const { child, runner } = spawnedRunner();
   const progress: ProgressItem[] = [];
-  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress: (item) => progress.push(item) });
+  const running = runner.run(runOptions({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress: (item) => progress.push(item) }));
 
   child.stdout.emit("data", Buffer.from('{"type":"tool_execution_start","toolName":"read"}\n'));
   child.stdout.emit("data", Buffer.from('{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Final answer"}],"usage":{"input":3,"output":5,"cacheRead":7,"cacheWrite":11,"cost":{"total":0.25}},"model":"openai/gpt-5","stopReason":"stop"'));
@@ -271,7 +305,7 @@ test("reduces split assistant events into final output and accumulated usage", a
 test("reduces split Pi text_delta updates into bounded latest text progress", async () => {
   const { child, runner } = spawnedRunner();
   const progress: ProgressItem[] = [];
-  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress: (item) => progress.push(item) });
+  const running = runner.run(runOptions({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress: (item) => progress.push(item) }));
 
   child.stdout.emit("data", Buffer.from('{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","delta":"Hel'));
   child.stdout.emit("data", Buffer.from('lo"}}\n{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","delta":" world"}}\n'));
@@ -284,7 +318,7 @@ test("reduces split Pi text_delta updates into bounded latest text progress", as
 test("records cumulative partial metadata across multibyte deltas and resets it for the next assistant message", async () => {
   const { child, runner } = spawnedRunner();
   const progress: ProgressItem[] = [];
-  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress: (item) => progress.push(item) });
+  const running = runner.run(runOptions({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress: (item) => progress.push(item) }));
   const firstDelta = "😀".repeat(12_800);
   const secondDelta = "😀".repeat(100);
 
@@ -310,7 +344,7 @@ test("records cumulative partial metadata across multibyte deltas and resets it 
 test("keeps a UTF-8-safe partial prefix after a multibyte truncation boundary", async () => {
   const { child, runner } = spawnedRunner();
   const progress: ProgressItem[] = [];
-  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress: (item) => progress.push(item) });
+  const running = runner.run(runOptions({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress: (item) => progress.push(item) }));
   const expected = "a".repeat(CAPTURED_TEXT_MAX_BYTES - 1);
   const first = expected + "😀";
   const second = "x";
@@ -336,7 +370,7 @@ test("keeps a UTF-8-safe partial prefix after a multibyte truncation boundary", 
 test("resets partial text when a new assistant message starts", async () => {
   const { child, runner } = spawnedRunner();
   const progress: ProgressItem[] = [];
-  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress: (item) => progress.push(item) });
+  const running = runner.run(runOptions({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress: (item) => progress.push(item) }));
 
   child.stdout.emit("data", Buffer.from('{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","delta":"old"}}\n'));
   child.stdout.emit("data", Buffer.from('{"type":"message_start","message":{"role":"assistant"}}\n'));
@@ -350,7 +384,7 @@ test("resets partial text when a new assistant message starts", async () => {
 test("streams every documented tool event through progress without retaining a capped history", async () => {
   const { child, runner } = spawnedRunner();
   const progress: ProgressItem[] = [];
-  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress: (item) => progress.push(item) });
+  const running = runner.run(runOptions({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress: (item) => progress.push(item) }));
 
   for (let index = 0; index < 201; index += 1) {
     child.stdout.emit("data", Buffer.from(`{"type":"tool_execution_start","toolName":"read-${index}"}\n`));
@@ -370,7 +404,7 @@ test("resolves a spawn error as a failed result", async () => {
       return child;
     },
   });
-  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} });
+  const running = runner.run(runOptions({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} }));
 
   child.emit("error", new Error("pi missing"));
   const result = await running.result;
@@ -381,7 +415,7 @@ test("resolves a spawn error as a failed result", async () => {
 test("records assistant error metadata when capture truncates", async () => {
   const { child, runner } = spawnedRunner();
   const errorText = "😀".repeat(13_000);
-  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} });
+  const running = runner.run(runOptions({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} }));
 
   child.stdout.emit("data", Buffer.from(`${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], errorMessage: errorText } })}\n`));
   child.close(1);
@@ -396,7 +430,7 @@ test("records assistant error metadata when capture truncates", async () => {
 
 test("clears error metadata when a later assistant error fits capture", async () => {
   const { child, runner } = spawnedRunner();
-  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} });
+  const running = runner.run(runOptions({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} }));
 
   for (const errorMessage of ["😀".repeat(13_000), "later error"]) {
     child.stdout.emit("data", Buffer.from(`${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], errorMessage } })}\n`));
@@ -412,7 +446,7 @@ test("records spawn error metadata when capture truncates", async () => {
   const child = new FakeChildProcess();
   const runner = new PiProcessRunner({ spawnProcess: () => child });
   const errorText = "😀".repeat(13_000);
-  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} });
+  const running = runner.run(runOptions({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} }));
 
   child.emit("error", new Error(errorText));
   const result = await running.result;
@@ -424,7 +458,7 @@ test("records spawn error metadata when capture truncates", async () => {
 
 test("fails a child closed by an external signal even after assistant output", async () => {
   const { child, runner } = spawnedRunner();
-  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} });
+  const running = runner.run(runOptions({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} }));
 
   child.stdout.emit("data", Buffer.from('{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"partial answer"}]}}\n'));
   child.close(null, "SIGTERM");
@@ -442,7 +476,7 @@ test("settles error and close exactly once while cleaning listeners and cancella
     setTimer: () => "timer",
     clearTimer: (timer) => { cleared.push(timer); },
   });
-  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} });
+  const running = runner.run(runOptions({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} }));
 
   await running.cancel();
   child.emit("error", new Error("spawn failed"));
@@ -460,7 +494,7 @@ test("settles error and close exactly once while cleaning listeners and cancella
 
 test("bounds captured output, stderr, assistant errors, and malformed samples before returning a result", async () => {
   const { child, runner } = spawnedRunner();
-  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} });
+  const running = runner.run(runOptions({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} }));
   const oversized = "😀".repeat(15_000);
 
   child.stdout.emit("data", Buffer.from(`not-json-${oversized}\n`));
@@ -496,7 +530,7 @@ test("cancellation sends SIGTERM then SIGKILL after five seconds unless the proc
     },
     clearTimer() {},
   });
-  const running = runner.run({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} });
+  const running = runner.run(runOptions({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} }));
 
   await running.cancel();
   assert.deepEqual(child.signals, ["SIGTERM"]);

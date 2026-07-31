@@ -9,15 +9,11 @@ import { getLaunchToolAllowlist } from "./profile-capabilities.js";
 import { CAPTURED_TEXT_MAX_BYTES, truncateUtf8 } from "./output.js";
 import type { AgentProfile, JobRequest, ProgressItem, TextTruncation, UsageStats } from "./types.js";
 
-const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-
 export interface ProcessRunOptions {
   cwd: string;
   request: JobRequest;
   profile: AgentProfile;
-  parentModel?: string;
-  thinkingLevel?: string;
-  launchOptions?: LaunchOptions;
+  launchOptions: LaunchOptions;
   onProgress(item: ProgressItem): void;
 }
 
@@ -96,13 +92,6 @@ const getAssistantText = (message: Record<string, unknown>): string | undefined 
   return undefined;
 };
 
-const resolveModel = (profile: AgentProfile, parentModel?: string, thinkingLevel?: string): string | undefined => {
-  const model = profile.model ?? parentModel;
-  const suffix = model?.slice(model.lastIndexOf(":") + 1);
-  if (!model || !thinkingLevel || (model.includes(":") && suffix && THINKING_LEVELS.has(suffix))) return model;
-  return `${model}:${thinkingLevel}`;
-};
-
 const getPiInvocation = (args: string[], fileExists: (path: string) => boolean = existsSync): { command: string; args: string[] } => {
   const currentScript = process.argv[1];
   if (currentScript && !currentScript.startsWith("/$bunfs/root/") && fileExists(currentScript)) {
@@ -140,9 +129,10 @@ export class PiProcessRunner implements ProcessRunner {
   run(options: ProcessRunOptions): RunningProcess {
     const parser = new JsonLineParser();
     const usage = emptyUsage();
-    const model = resolveModel(options.profile, options.parentModel, options.thinkingLevel);
+    const { modelArgument, thinkingArgument } = options.launchOptions;
     const args = ["--mode", "json", "-p", "--no-session"];
-    if (model) args.push("--model", model);
+    if (modelArgument) args.push("--model", modelArgument);
+    if (thinkingArgument) args.push("--thinking", thinkingArgument);
 
     const accessMode = options.request.writeAccess ? "write" : "read-only";
     const tools = getLaunchToolAllowlist(options.profile, accessMode);
@@ -160,7 +150,7 @@ export class PiProcessRunner implements ProcessRunner {
     let stderrOriginalBytes = 0;
     let stderrTruncation: TextTruncation | undefined;
     const stderrDecoder = new StringDecoder("utf8");
-    let resultModel = model;
+    let resultModel = modelArgument;
     let stopReason: string | undefined;
     let errorMessage: string | undefined;
     let errorTruncation: TextTruncation | undefined;

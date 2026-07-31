@@ -338,8 +338,6 @@ export class JobManager {
           cwd: entry.job.request.cwd ?? entry.defaults.cwd,
           request: structuredClone(entry.job.request),
           profile: structuredClone(entry.job.profile),
-          parentModel: entry.defaults.parentModel,
-          thinkingLevel: entry.defaults.thinkingLevel,
           launchOptions: structuredClone(entry.launchOptions),
           onProgress: (item) => {
             if (registered) this.addProgress(entry, item);
