@@ -192,6 +192,13 @@ export class SubagentsDashboard implements Component {
     wrap("Task: ", job.request.task);
     wrap("Profile: ", job.profile.name);
     wrap("Access: ", job.request.writeAccess ? "write" : "read-only");
+    const thinkingSource = job.launchThinkingSource === "job" ? "job override"
+      : job.launchThinkingSource === "parent" ? "parent session"
+        : job.launchThinkingSource === "legacy" ? "legacy profile/parent behavior"
+          : "model or Pi default";
+    wrap("Launch model: ", job.launchModel ?? "Pi default");
+    wrap("Launch thinking: ", job.launchThinkingLevel ? `${job.launchThinkingLevel} (${thinkingSource})` : thinkingSource);
+    wrap("Reported model: ", job.model ?? "not reported");
     wrap("Created: ", new Date(job.createdAt).toISOString());
     wrap("Started: ", job.startedAt ? new Date(job.startedAt).toISOString() : "not started");
     wrap("Finished: ", job.finishedAt ? new Date(job.finishedAt).toISOString() : "not finished");
