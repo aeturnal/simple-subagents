@@ -265,6 +265,22 @@ test("dashboard detail shows independent actionable diagnostics and capture noti
   }
 });
 
+test("dashboard details distinguish launch selections from the reported model", () => {
+  const view = dashboard(new FakeManager([job("job-1", "completed", {
+    launchModel: "anthropic/sonnet",
+    launchThinkingLevel: "high",
+    launchThinkingSource: "parent",
+    model: "anthropic/claude-sonnet-4-5-20250929",
+  })]));
+
+  view.handleInput?.("\r");
+  const detail = render(view, 160);
+  assert.match(detail, /Launch model: anthropic\/sonnet/);
+  assert.match(detail, /Launch thinking: high \(parent session\)/);
+  assert.match(detail, /Reported model: anthropic\/claude-sonnet-4-5-20250929/);
+  view.dispose();
+});
+
 test("dashboard details always render every required label with absent-value placeholders", () => {
   const view = dashboard(new FakeManager([job("job-1", "queued", {
     progress: [], output: "", stderr: "", startedAt: undefined, finishedAt: undefined, truncation: undefined,
@@ -275,6 +291,11 @@ test("dashboard details always render every required label with absent-value pla
   for (const label of ["Task:", "Profile:", "Access:", "Created:", "Started:", "Finished:", "Progress:", "Output:", "Output capture:", "Stderr:", "Stderr capture:", "Error:", "Error capture:", "Partial output capture:", "Usage:", "Truncated:"]) {
     assert.ok(detail.includes(label), `missing ${label}`);
   }
+  for (const label of ["Launch model:", "Launch thinking:", "Reported model:"]) {
+    assert.ok(detail.includes(label), `missing ${label}`);
+  }
+  assert.match(detail, /Launch model: Pi default/);
+  assert.match(detail, /Reported model: not reported/);
   assert.match(detail, /Started: not started/);
   assert.match(detail, /Finished: not finished/);
   assert.match(detail, /Progress: none/);
@@ -460,7 +481,7 @@ test("dashboard collection formats completed, failed, and cancelled terminal sna
     assert.equal(pi.messages[0]?.message.display, true);
     assert.ok(pi.messages[0]?.message.content.includes(`Status: ${state}`));
     assert.match(pi.messages[0]?.message.content, /The collected answer/);
-    assert.match(pi.messages[0]?.message.content, /Model: test-model/);
+    assert.match(pi.messages[0]?.message.content, /Reported model: test-model/);
     assert.match(pi.messages[0]?.message.content, /Usage: input 1, output 2, cache read 3, cache write 4, cost 0.5, turns 1/);
     if (state !== "completed") assert.match(pi.messages[0]?.message.content, /The terminal error/);
     assert.deepEqual(pi.messages[0]?.options, { deliverAs: "nextTurn" });

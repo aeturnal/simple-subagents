@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { discoverAgents } from "../src/agents.ts";
+import { resolveLaunchOptions } from "../src/launch-options.ts";
 import { PiProcessRunner, type SpawnOptions, type SpawnedProcess } from "../src/process-runner.ts";
 
 const integrationTest = process.env.SIMPLE_SUBAGENTS_INTEGRATION === "1" ? test : test.skip;
@@ -37,14 +38,16 @@ integrationTest("real Pi reads a file with the generic read-only profile", { tim
       return spawn(command, args, options) as unknown as SpawnedProcess;
     },
   });
+  const request = {
+    task: "Read answer.txt and return its exact contents.",
+    agent: "generic",
+    writeAccess: false,
+  };
   running = runner.run({
     cwd,
-    request: {
-      task: "Read answer.txt and return its exact contents.",
-      agent: "generic",
-      writeAccess: false,
-    },
+    request,
     profile: generic,
+    launchOptions: resolveLaunchOptions(request, generic, {}),
     onProgress() {},
   });
   void running.result.then(() => {
@@ -63,4 +66,54 @@ integrationTest("real Pi reads a file with the generic read-only profile", { tim
   assert.equal(result.exitCode, 0);
   assert.notEqual(result.output, "");
   assert.equal(result.output, answer, `Pi output: ${JSON.stringify(result.output)}\nPi stderr: ${result.stderr}`);
+});
+
+integrationTest("real Pi accepts explicit thinking over a model-pattern suffix", { timeout: 120_000 }, async (t) => {
+  const modelPattern = process.env.SIMPLE_SUBAGENTS_INTEGRATION_MODEL_WITH_THINKING;
+  if (!modelPattern) {
+    t.skip("set SIMPLE_SUBAGENTS_INTEGRATION_MODEL_WITH_THINKING to an authenticated Pi model pattern ending in a thinking suffix");
+    return;
+  }
+
+  const cwd = await mkdtemp(join(tmpdir(), "simple-subagents-thinking-integration-"));
+  let running: ReturnType<PiProcessRunner["run"]> | undefined;
+
+  t.after(async () => {
+    if (running) {
+      await running.cancel();
+      await running.result;
+    }
+    await rm(cwd, { recursive: true, force: true });
+  });
+
+  const profile = (await discoverAgents(join(cwd, "agents"))).agents.find((entry) => entry.name === "generic");
+  assert.ok(profile);
+  const request = {
+    task: "Reply with exactly: precedence-ok",
+    agent: "generic",
+    writeAccess: false,
+    thinkingLevel: "low" as const,
+  };
+  let invocation: { command: string; args: string[] } | undefined;
+  const runner = new PiProcessRunner({
+    fileExists: () => false,
+    spawnProcess(command, args, options) {
+      invocation = { command, args: [...args] };
+      return spawn(command, args, options) as unknown as SpawnedProcess;
+    },
+  });
+  running = runner.run({
+    cwd,
+    request,
+    profile,
+    launchOptions: resolveLaunchOptions(request, { ...profile, model: modelPattern }, {}),
+    onProgress() {},
+  });
+
+  assert.ok(invocation);
+  assert.equal(invocation.args[invocation.args.indexOf("--model") + 1], modelPattern);
+  assert.equal(invocation.args[invocation.args.indexOf("--thinking") + 1], "low");
+  const result = await running.result;
+  assert.equal(result.exitCode, 0, `Pi stderr: ${result.stderr}`);
+  assert.equal(result.output.trim(), "precedence-ok");
 });

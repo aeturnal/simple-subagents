@@ -1,3 +1,4 @@
+import { resolveLaunchOptions, type LaunchDefaults, type LaunchOptions } from "./launch-options.js";
 import type { ProcessResult, ProcessRunner, RunningProcess } from "./process-runner.js";
 import { CAPTURED_TEXT_MAX_BYTES, MALFORMED_EVENT_SAMPLE_MAX_BYTES, truncateUtf8 } from "./output.js";
 import { isSettled, type AgentProfile, type Job, type JobRequest, type JobState, type ProgressItem, type UsageStats } from "./types.js";
@@ -35,6 +36,7 @@ const emptyUsage = (): UsageStats => ({ input: 0, output: 0, cacheRead: 0, cache
 interface InternalJob {
   job: Job;
   defaults: { cwd: string; parentModel?: string; thinkingLevel?: string };
+  launchOptions: LaunchOptions;
   cancellationRequested: boolean;
   cancellation?: Promise<void>;
 }
@@ -84,7 +86,7 @@ export class JobManager {
   enqueue(
     requests: JobRequest[],
     profiles: ReadonlyMap<string, AgentProfile>,
-    defaults: { cwd: string; parentModel?: string; thinkingLevel?: string },
+    defaults: LaunchDefaults & { cwd: string },
   ): Job[] {
     if (this.stopped) throw new Error("Job manager has been shut down");
     if (requests.length === 0) throw new Error("Enqueue requires at least one job");
@@ -93,12 +95,16 @@ export class JobManager {
     const selected = requests.map((request) => {
       const profile = profiles.get(request.agent);
       if (!profile) throw new Error(`Unknown agent profile: ${request.agent}`);
-      return { request, profile };
+      const launchOptions = resolveLaunchOptions(request, profile, defaults);
+      return { request, profile, launchOptions };
     });
+    const diagnostic = selected.flatMap((entry) => entry.launchOptions.diagnostics)[0];
+    if (diagnostic) throw new Error(diagnostic);
 
     const createdAt = this.now();
-    const added: InternalJob[] = selected.map(({ request, profile }) => ({
+    const added: InternalJob[] = selected.map(({ request, profile, launchOptions }) => ({
       defaults: { ...defaults },
+      launchOptions: structuredClone(launchOptions),
       cancellationRequested: false,
       job: {
         id: `job-${this.nextId++}`,
@@ -111,6 +117,9 @@ export class JobManager {
         stderr: "",
         usage: emptyUsage(),
         malformedEventCount: 0,
+        launchModel: launchOptions.launchModel,
+        launchThinkingLevel: launchOptions.launchThinkingLevel,
+        launchThinkingSource: launchOptions.launchThinkingSource,
       },
     }));
 
@@ -329,8 +338,7 @@ export class JobManager {
           cwd: entry.job.request.cwd ?? entry.defaults.cwd,
           request: structuredClone(entry.job.request),
           profile: structuredClone(entry.job.profile),
-          parentModel: entry.defaults.parentModel,
-          thinkingLevel: entry.defaults.thinkingLevel,
+          launchOptions: structuredClone(entry.launchOptions),
           onProgress: (item) => {
             if (registered) this.addProgress(entry, item);
             else synchronousProgress.push(structuredClone(item));

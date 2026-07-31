@@ -5,13 +5,17 @@ import { Type, type Static } from "typebox";
 import { JobManager, type WaitJobStatus, type WaitResult, type WaitUntil } from "./job-manager.js";
 import { capCollectedPayload, formatCollectedResult } from "./output.js";
 import { buildPublicAgentDiscovery, formatUnknownProfileDiagnostic, type PublicAgentProfile } from "./profile-discovery.js";
-import type { AgentProfile, Job, JobRequest } from "./types.js";
+import { THINKING_LEVELS, type AgentProfile, type Job, type JobRequest } from "./types.js";
+
+const MODEL_PATTERN = "^(?!\\s)(?![\\s\\S]*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f]+$";
 
 const StartTask = Type.Object({
   task: Type.String({ minLength: 1 }),
   agent: Type.Optional(Type.String({ default: "generic" })),
   writeAccess: Type.Optional(Type.Boolean({ default: false })),
   cwd: Type.Optional(Type.String()),
+  model: Type.Optional(Type.String({ minLength: 1, pattern: MODEL_PATTERN })),
+  thinkingLevel: Type.Optional(StringEnum(THINKING_LEVELS)),
 });
 
 export const StartParams = Type.Object({
@@ -82,6 +86,8 @@ const toRequest = (task: StartInput["tasks"][number]): JobRequest => ({
   agent: task.agent ?? "generic",
   writeAccess: task.writeAccess ?? false,
   cwd: task.cwd,
+  model: task.model,
+  thinkingLevel: task.thinkingLevel,
 });
 
 const summary = (jobs: readonly Job[]): string => jobs.map((job) => `${job.id} (${job.state})`).join(", ");
@@ -265,6 +271,22 @@ const renderAgentProfiles = (
   return theme.fg("muted", [compact, detail].filter(Boolean).join("\n\n"));
 };
 
+const launchThinking = (job: Job): string => {
+  if (job.launchThinkingLevel) {
+    const source = job.launchThinkingSource === "job" ? "job override"
+      : job.launchThinkingSource === "parent" ? "parent session"
+        : "legacy profile/parent behavior";
+    return `${job.launchThinkingLevel} (${source})`;
+  }
+  return job.launchThinkingSource === "legacy" ? "legacy profile/parent behavior" : "model or Pi default";
+};
+
+const launchDetail = (job: Job): string => [
+  `  ${job.request.task}`,
+  `  Launch model: ${job.launchModel ?? "Pi default"}`,
+  `  Launch thinking: ${launchThinking(job)}`,
+].join("\n");
+
 const renderToolResult = (result: ToolResponse, expanded: boolean, theme: { fg(color: string, text: string): string }): string => {
   if ("outcome" in result.details) return renderWaitResult(result, expanded, theme);
   const { jobs, diagnostics, operation } = result.details;
@@ -278,7 +300,7 @@ const renderToolResult = (result: ToolResponse, expanded: boolean, theme: { fg(c
   if (!expanded) return theme.fg("muted", compact);
 
   const detail = operation === "collect" || diagnostics.length > 0 ? content
-    : operation === "start" || operation === "status" ? jobs.map((job) => `  ${job.request.task}`).join("\n")
+    : operation === "start" || operation === "status" ? jobs.map(launchDetail).join("\n")
       : "";
   return theme.fg("muted", [compact, detail].filter(Boolean).join("\n\n"));
 };

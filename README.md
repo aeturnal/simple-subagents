@@ -43,6 +43,26 @@ model: anthropic/claude-sonnet-4-5
 Return concise, line-referenced findings.
 ```
 
+### Per-job model and thinking
+
+A start task can temporarily override its child model and thinking level without changing the profile or parent session:
+
+```json
+{
+  "task": "Review the authentication changes",
+  "agent": "reviewer",
+  "writeAccess": false,
+  "model": "anthropic/claude-sonnet-4-5",
+  "thinkingLevel": "high"
+}
+```
+
+Both fields are optional. Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Model selection is job override, then profile, then parent session, then Pi's child default. A job model without a job thinking level inherits the parent thinking level when available.
+
+Model values are opaque Pi IDs or patterns. Values such as `ollama/llama3.1:8b` and models with multiple colons are passed unchanged through `--model`; job thinking is passed separately through `--thinking`, so it overrides a thinking shorthand in the model pattern according to Pi's CLI precedence. Pi remains responsible for pattern resolution, model availability, provider credentials, and provider-specific validation.
+
+Start and status views report **Launch model** and **Launch thinking**, which describe the arguments selected by this extension. Collected output reports Pi's **Reported model** separately; both model values are shown when resolution produces a different model ID. Overrides do not change the profile prompt, tools, access mode, working directory, parent model, or sibling jobs.
+
 Use `subagent_agents({})` when profile names or capabilities are unknown. It returns profiles in discovery order (built-in `generic` first), including configured model inheritance and the read-only and writable tool allowlists passed when child Pi starts. These are launch ceilings, not guarantees of effective runtime tools: trusted child extensions may alter active tools.
 
 A writable launch allowlist does not authorize a job to write. The parent must still start that job with `writeAccess: true`, and configured write confirmation still applies. Discovery never returns profile system prompts, profile file paths, raw frontmatter, discovery diagnostics, credentials, or parent session context.

@@ -5,6 +5,10 @@ export interface SimpleSubagentsConfig {
 export type JobState = "queued" | "running" | "completed" | "failed" | "cancelled" | "collected" | "discarded";
 export type AccessMode = "read-only" | "write";
 
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+export type LaunchThinkingSource = "job" | "parent" | "model_or_pi_default" | "legacy";
+
 export interface AgentProfile {
   name: string;
   description: string;
@@ -20,6 +24,8 @@ export interface JobRequest {
   agent: string;
   writeAccess: boolean;
   cwd?: string;
+  model?: string;
+  thinkingLevel?: ThinkingLevel;
 }
 
 export interface UsageStats {
@@ -55,6 +61,9 @@ export interface Job {
   output: string;
   stderr: string;
   usage: UsageStats;
+  launchModel?: string;
+  launchThinkingLevel?: ThinkingLevel;
+  launchThinkingSource?: LaunchThinkingSource;
   model?: string;
   stopReason?: string;
   errorMessage?: string;

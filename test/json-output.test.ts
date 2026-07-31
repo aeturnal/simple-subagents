@@ -145,6 +145,43 @@ test("formats a completed result deterministically", () => {
   );
 });
 
+test("formats launch selection and matching child-reported model explicitly", () => {
+  const formatted = formatCollectedResult(job({
+    launchModel: "openai/gpt-5",
+    launchThinkingLevel: "high",
+    launchThinkingSource: "job",
+    model: "openai/gpt-5",
+  }));
+
+  assert.match(formatted, /- Launch model: openai\/gpt-5/);
+  assert.match(formatted, /- Launch thinking: high \(job override\)/);
+  assert.match(formatted, /- Reported model: openai\/gpt-5/);
+});
+
+test("retains differing launch and reported models", () => {
+  const formatted = formatCollectedResult(job({
+    launchModel: "anthropic/sonnet",
+    launchThinkingSource: "model_or_pi_default",
+    model: "anthropic/claude-sonnet-4-5-20250929",
+  }));
+
+  assert.match(formatted, /- Launch model: anthropic\/sonnet/);
+  assert.match(formatted, /- Reported model: anthropic\/claude-sonnet-4-5-20250929/);
+});
+
+test("keeps launch selection beside Pi unavailable-model diagnostics", () => {
+  const formatted = formatCollectedResult(job({
+    state: "failed",
+    launchModel: "missing/provider-model",
+    launchThinkingLevel: "low",
+    launchThinkingSource: "job",
+    stderr: "Model not found or provider authentication unavailable",
+  }));
+
+  assert.match(formatted, /- Launch model: missing\/provider-model/);
+  assert.match(formatted, /Model not found or provider authentication unavailable/);
+});
+
 test("formats model, usage, and independent actionable diagnostics", () => {
   const formatted = formatCollectedResult(job({
     state: "failed",
@@ -160,7 +197,7 @@ test("formats model, usage, and independent actionable diagnostics", () => {
   }));
 
   for (const expected of [
-    "- Model: openai/gpt-5",
+    "- Reported model: openai/gpt-5",
     "- Usage: input 1, output 2, cache read 3, cache write 4, cost 0.5, turns 6",
     "Output capture truncated: retained 51200 of 60000 bytes.",
     "Stderr capture truncated: retained 51200 of 70000 bytes.",

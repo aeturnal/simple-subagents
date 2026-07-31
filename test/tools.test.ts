@@ -113,9 +113,36 @@ test("startJobs applies generic read-only defaults and reports every created ID"
   assert.match(text(result), /Started 2 jobs/);
   assert.deepEqual(result.details.jobs.map((job) => job.id), ["job-1", "job-2"]);
   assert.deepEqual(runner.started.map((entry) => entry.options.request), [
-    { task: "inspect this", agent: "generic", writeAccess: false, cwd: undefined },
-    { task: "review this", agent: "reviewer", writeAccess: false, cwd: "/other" },
+    { task: "inspect this", agent: "generic", writeAccess: false, cwd: undefined, model: undefined, thinkingLevel: undefined },
+    { task: "review this", agent: "reviewer", writeAccess: false, cwd: "/other", model: undefined, thinkingLevel: undefined },
   ]);
+});
+
+test("startJobs forwards per-job overrides and renders launch selections immediately", async () => {
+  const { services, runner } = createServices();
+  const result = await startJobs({
+    tasks: [{ task: "review", agent: "reviewer", model: "ollama/llama3.1:8b", thinkingLevel: "low" }],
+  }, services, {} as never);
+
+  assert.deepEqual(runner.started[0]?.options.request, {
+    task: "review",
+    agent: "reviewer",
+    writeAccess: false,
+    cwd: undefined,
+    model: "ollama/llama3.1:8b",
+    thinkingLevel: "low",
+  });
+  assert.equal(result.details.jobs[0]?.launchModel, "ollama/llama3.1:8b");
+
+  const pi = new FakePi();
+  registerSubagentTools(pi as never, services);
+  const rendered = pi.tools.get("subagent_start")?.renderResult(
+    result,
+    { expanded: true },
+    { fg: (_color: string, value: string) => value },
+  ).render(160).join("\n") ?? "";
+  assert.match(rendered, /Launch model: ollama\/llama3\.1:8b/);
+  assert.match(rendered, /Launch thinking: low \(job override\)/);
 });
 
 test("startJobs validates an over-eight batch without starting any jobs", async () => {
@@ -376,7 +403,7 @@ test("controlJobs formats the terminal snapshot before collecting it", async () 
   assert.match(text(result), /# Subagent result: job-1/);
   assert.match(text(result), /Status: completed/);
   assert.match(text(result), /secret final answer/);
-  assert.match(text(result), /Model: test-model/);
+  assert.match(text(result), /Reported model: test-model/);
   assert.match(text(result), /Usage: input 1, output 2, cache read 3, cache write 4, cost 0.5, turns 1/);
   assert.equal(result.details.jobs[0]?.state, "collected");
   assert.equal(services.manager.get("job-1")?.state, "collected");
@@ -462,7 +489,10 @@ test("tool renderers preserve task detail when expanded and keep compact control
   assert.match(compactStart, /Started 2 jobs/);
   assert.match(compactStart, /… job-1 running/);
   assert.match(compactStart, /… job-2 running/);
-  assert.match(render("subagent_start", started, true), /  one\s+  two/);
+  assert.doesNotMatch(compactStart, /Launch model|Launch thinking/);
+  const expandedStart = render("subagent_start", started, true);
+  assert.match(expandedStart, /  one/);
+  assert.match(expandedStart, /  two/);
 
   runner.started[0]?.resolve(completed("collected secret"));
   await runner.flush();
@@ -619,7 +649,7 @@ test("registered tools expose strict schema boundaries and required guidance", (
   const { services } = createServices();
   registerSubagentTools(pi as never, services);
 
-  const startSchema = StartParams as unknown as { properties: { tasks: { minItems: number; maxItems: number; items: { properties: { task: { minLength: number }; agent: { default: string }; writeAccess: { default: boolean } } } } } };
+  const startSchema = StartParams as unknown as { properties: { tasks: { minItems: number; maxItems: number; items: { properties: { task: { minLength: number }; agent: { default: string }; writeAccess: { default: boolean }; model: { minLength: number; pattern: string }; thinkingLevel: { enum: string[] } } } } } };
   const statusSchema = StatusParams as unknown as { properties: { id: { type: string } } };
   const controlSchema = ControlParams as unknown as { properties: { action: { enum: string[] }; ids: { minItems: number; maxItems: number } } };
   assert.equal(startSchema.properties.tasks.minItems, 1);
@@ -627,6 +657,12 @@ test("registered tools expose strict schema boundaries and required guidance", (
   assert.equal(startSchema.properties.tasks.items.properties.task.minLength, 1);
   assert.equal(startSchema.properties.tasks.items.properties.agent.default, "generic");
   assert.equal(startSchema.properties.tasks.items.properties.writeAccess.default, false);
+  const taskProperties = startSchema.properties.tasks.items.properties;
+  assert.equal(taskProperties.model.minLength, 1);
+  assert.deepEqual(taskProperties.thinkingLevel.enum, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+  assert.equal(new RegExp(taskProperties.model.pattern).test("ollama/llama3.1:8b"), true);
+  assert.equal(new RegExp(taskProperties.model.pattern).test(" leading"), false);
+  assert.equal(new RegExp(taskProperties.model.pattern).test("vendor/model\u0000name"), false);
   assert.equal(statusSchema.properties.id.type, "string");
   assert.deepEqual(controlSchema.properties.action.enum, ["cancel", "collect", "discard"]);
   assert.equal(controlSchema.properties.ids.minItems, 1);
@@ -988,11 +1024,34 @@ test("runtime loads config and profiles, surfaces diagnostics, confirms writable
   assert.deepEqual(runner.started.map(({ options }) => ({
     cwd: options.cwd,
     profile: options.profile.name,
-    parentModel: options.parentModel,
-    thinkingLevel: options.thinkingLevel,
+    launchOptions: options.launchOptions,
   })), [
-    { cwd: "/workspace", profile: "writer", parentModel: "parent/model", thinkingLevel: "high" },
-    { cwd: "/workspace", profile: "writer", parentModel: "parent/model", thinkingLevel: "high" },
+    {
+      cwd: "/workspace",
+      profile: "writer",
+      launchOptions: {
+        path: "legacy",
+        modelArgument: "parent/model:high",
+        thinkingArgument: undefined,
+        launchModel: "parent/model:high",
+        launchThinkingLevel: "high",
+        launchThinkingSource: "legacy",
+        diagnostics: [],
+      },
+    },
+    {
+      cwd: "/workspace",
+      profile: "writer",
+      launchOptions: {
+        path: "legacy",
+        modelArgument: "parent/model:high",
+        thinkingArgument: undefined,
+        launchModel: "parent/model:high",
+        launchThinkingLevel: "high",
+        launchThinkingSource: "legacy",
+        diagnostics: [],
+      },
+    },
   ]);
 
   const shuttingDown = pi.emit("session_shutdown", { reason: "reload" }, fakeContext({ hasUI: true }, pi));
