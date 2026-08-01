@@ -18,7 +18,6 @@ import {
 } from "../src/tools.ts";
 import {
   createSimpleSubagentsExtension,
-  installCompletionNotifier,
   type ExtensionDependencies,
 } from "../src/index.js";
 import { JobManager } from "../src/job-manager.js";
@@ -695,281 +694,32 @@ test("registered tools expose strict schema boundaries and required guidance", (
   assert.match(pi.tools.get("subagent_wait")?.description ?? "", /at most 30 seconds/i);
 });
 
-test("completion notices steer real terminal transitions at the next turn boundary without leaking output", async () => {
+test("runtime does not register or emit automatic completion messages", async () => {
   const pi = new FakePi();
-  const timers = new FakeTimers();
   const runner = new ControlledRunner();
   const manager = new JobManager({ runner });
-  const cleanup = installCompletionNotifier(pi as never, manager, timers);
+  createSimpleSubagentsExtension({
+    createManager: () => manager,
+    loadConfig: async () => ({ config: { confirmWrites: false } }),
+    discoverProfiles: async () => ({
+      agents: [{ ...profile, name: "generic", source: "builtin" }],
+      diagnostics: [],
+    }),
+  })(pi as never);
+  await pi.emit("session_start", {}, fakeContext({ hasUI: false }, pi));
+
   manager.enqueue(
-    [{ task: "first secret", agent: "generic", writeAccess: false }, { task: "second secret", agent: "generic", writeAccess: false }, { task: "third secret", agent: "generic", writeAccess: false }],
+    [{ task: "finish without a message", agent: "generic", writeAccess: false }],
     new Map([["generic", { ...profile, name: "generic", source: "builtin" }]]),
     { cwd: "/workspace" },
   );
-
-  runner.started[0]?.resolve(completed("first secret"));
-  runner.started[1]?.resolve({ ...completed("second secret"), exitCode: 1 });
-  await manager.cancel("job-3");
-  await runner.flush();
-  assert.deepEqual(timers.delays, [100]);
-  timers.runAll();
-
-  assert.equal(pi.messages.length, 1);
-  assert.deepEqual(pi.messages[0]?.details, { jobIds: ["job-1", "job-2", "job-3"] });
-  assert.equal(
-    pi.messages[0]?.content,
-    "Jobs may be ready: job-1 (completed), job-2 (failed), job-3 (cancelled).\n" +
-      "Check their current state. Collect any still-uncollected results needed by the active task; otherwise no action is required.",
-  );
-  assert.doesNotMatch(pi.messages[0]?.content ?? "", /secret/);
-  assert.doesNotMatch(pi.messages[0]?.content ?? "", /ask the user/i);
-  assert.deepEqual(pi.messageOptions[0], { deliverAs: "steer", triggerTurn: true });
-
-  runner.started[2]?.resolve(completed("third secret"));
-  await runner.flush();
-  assert.equal(timers.pending.length, 0);
-  cleanup();
-});
-
-test("completion notifier suppresses jobs collected or discarded before flush", async () => {
-  const pi = new FakePi();
-  const timers = new FakeTimers();
-  const runner = new ControlledRunner();
-  const manager = new JobManager({ runner });
-  const cleanup = installCompletionNotifier(pi as never, manager, timers);
-  manager.enqueue(
-    [
-      { task: "collect", agent: "generic", writeAccess: false },
-      { task: "discard", agent: "generic", writeAccess: false },
-    ],
-    new Map([["generic", { ...profile, name: "generic", source: "builtin" }]]),
-    { cwd: "/workspace" },
-  );
-
-  runner.started[0]?.resolve(completed("collected output"));
-  runner.started[1]?.resolve(completed("discarded output"));
-  await runner.flush();
-  manager.collect("job-1");
-  manager.discard("job-2");
-  timers.runAll();
-
-  assert.equal(pi.messages.length, 0);
-  assert.equal(manager.get("job-1")?.state, "collected");
-  assert.equal(manager.get("job-2")?.state, "discarded");
-  cleanup();
-});
-
-test("completion notifier keeps only collectable jobs in a mixed flush", async () => {
-  const pi = new FakePi();
-  const timers = new FakeTimers();
-  const runner = new ControlledRunner();
-  const manager = new JobManager({ runner });
-  const cleanup = installCompletionNotifier(pi as never, manager, timers);
-  manager.enqueue(
-    [
-      { task: "collect", agent: "generic", writeAccess: false },
-      { task: "discard", agent: "generic", writeAccess: false },
-      { task: "retain", agent: "generic", writeAccess: false },
-    ],
-    new Map([["generic", { ...profile, name: "generic", source: "builtin" }]]),
-    { cwd: "/workspace" },
-  );
-
-  runner.started[0]?.resolve(completed());
-  runner.started[1]?.resolve({ ...completed(), exitCode: 1 });
-  await manager.cancel("job-3");
-  await runner.flush();
-  manager.collect("job-1");
-  manager.discard("job-2");
-  timers.runAll();
-
-  assert.deepEqual(pi.messages[0]?.details, { jobIds: ["job-3"] });
-  assert.equal(
-    pi.messages[0]?.content,
-    "Jobs may be ready: job-3 (cancelled).\n" +
-      "Check their current state. Collect any still-uncollected results needed by the active task; otherwise no action is required.",
-  );
-  cleanup();
-});
-
-test("completion notifier treats a missing candidate as stale without suppressing another job", () => {
-  const pi = new FakePi();
-  const timers = new FakeTimers();
-  let listener: ((jobs: readonly Job[]) => void) | undefined;
-  const current = new Map<string, Job>([["job-2", { id: "job-2", state: "failed" } as Job]]);
-  const manager = {
-    subscribe(next: (jobs: readonly Job[]) => void) {
-      listener = next;
-      next([
-        { id: "job-1", state: "running" } as Job,
-        { id: "job-2", state: "running" } as Job,
-      ]);
-      return () => { listener = undefined; };
-    },
-    get(id: string) { return current.get(id); },
-  } as unknown as JobManager;
-  const cleanup = installCompletionNotifier(pi as never, manager, timers);
-
-  listener?.([
-    { id: "job-1", state: "completed" } as Job,
-    { id: "job-2", state: "failed" } as Job,
-  ]);
-  timers.runAll();
-
-  assert.deepEqual(pi.messages[0]?.details, { jobIds: ["job-2"] });
-  assert.match(pi.messages[0]?.content ?? "", /job-2 \(failed\)/);
-  assert.doesNotMatch(pi.messages[0]?.content ?? "", /job-1/);
-  cleanup();
-});
-
-test("completion notifier contains delivery failure, preserves the inbox result, and does not retry", async () => {
-  const pi = new FakePi();
-  pi.sendError = new Error("delivery unavailable");
-  const timers = new FakeTimers();
-  const runner = new ControlledRunner();
-  const manager = new JobManager({ runner });
-  const cleanup = installCompletionNotifier(pi as never, manager, timers);
-  manager.enqueue(
-    [{ task: "preserve", agent: "generic", writeAccess: false }],
-    new Map([["generic", { ...profile, name: "generic", source: "builtin" }]]),
-    { cwd: "/workspace" },
-  );
-
-  runner.started[0]?.resolve(completed("still in inbox"));
-  await runner.flush();
-  assert.doesNotThrow(() => timers.runAll());
-
-  assert.equal(pi.sendAttempts, 1);
-  assert.equal(pi.messages.length, 0);
-  assert.equal(manager.get("job-1")?.state, "completed");
-
-  pi.sendError = undefined;
-  manager.collect("job-1");
-  assert.equal(pi.sendAttempts, 1);
-  assert.equal(manager.get("job-1")?.state, "collected");
-  cleanup();
-});
-
-test("queued completion copy remains safe when collection happens before processing", async () => {
-  const pi = new FakePi();
-  const timers = new FakeTimers();
-  const runner = new ControlledRunner();
-  const manager = new JobManager({ runner });
-  const cleanup = installCompletionNotifier(pi as never, manager, timers);
-  manager.enqueue(
-    [{ task: "answer", agent: "generic", writeAccess: false }],
-    new Map([["generic", { ...profile, name: "generic", source: "builtin" }]]),
-    { cwd: "/workspace" },
-  );
-
   runner.started[0]?.resolve(completed());
   await runner.flush();
-  timers.runAll();
-  manager.collect("job-1");
+  await new Promise((resolve) => setTimeout(resolve, 150));
 
-  assert.equal(manager.get("job-1")?.state, "collected");
-  assert.match(pi.messages[0]?.content ?? "", /Check their current state/);
-  assert.match(pi.messages[0]?.content ?? "", /otherwise no action is required/);
-  assert.doesNotMatch(pi.messages[0]?.content ?? "", /ask the user/i);
-  assert.equal(timers.pending.length, 0);
-  cleanup();
-});
-
-test("ready-message renderer shows stale-safe copy and expands only filtered IDs", () => {
-  const pi = new FakePi();
-  createSimpleSubagentsExtension()(pi as never);
-  const renderer = pi.messageRenderers.get("simple-subagents-ready") as (
-    message: unknown,
-    options: { expanded: boolean; outputPad: number },
-    theme: { fg(color: string, value: string): string },
-  ) => { render(width: number): string[] };
-  const message = {
-    customType: "simple-subagents-ready",
-    content: "Jobs may be ready: job-2 (failed).\nCheck their current state. Collect any still-uncollected results needed by the active task; otherwise no action is required.",
-    display: true,
-    details: { jobIds: ["job-2"] },
-  };
-  const theme = { fg: (_color: string, value: string) => value };
-
-  const compact = renderer(message, { expanded: false, outputPad: 0 }, theme).render(200).join("\n");
-  const expanded = renderer(message, { expanded: true, outputPad: 0 }, theme).render(200).join("\n");
-  const fallback = renderer(
-    { customType: "simple-subagents-ready", details: { jobIds: [] } },
-    { expanded: false, outputPad: 0 },
-    theme,
-  ).render(200).join("\n");
-
-  assert.match(compact, /Jobs may be ready/);
-  assert.match(compact, /otherwise no action is required/);
-  assert.equal(compact.match(/job-2/g)?.length, 1);
-  assert.equal(expanded.match(/job-2/g)?.length, 2);
-  assert.doesNotMatch(expanded, /job-1|job output/);
-  assert.equal(fallback.trimEnd(), "Jobs may be ready.");
-});
-
-test("completion notifier cleanup clears a pending timer and unsubscribes", () => {
-  const pi = new FakePi();
-  const timers = new FakeTimers();
-  let listener: ((jobs: readonly Job[]) => void) | undefined;
-  const manager = { subscribe(next: (jobs: readonly Job[]) => void) { listener = next; return () => { listener = undefined; }; } } as unknown as JobManager;
-  const cleanup = installCompletionNotifier(pi as never, manager, timers);
-  listener?.([{ id: "job-1", state: "cancelled" } as Job]);
-
-  cleanup();
-  timers.runAll();
-
-  assert.equal(pi.messages.length, 0);
-  assert.equal(listener, undefined);
-});
-
-test("completion notifier flush captured before cleanup becomes a shutdown no-op", () => {
-  const pi = new FakePi();
-  const timers = new FakeTimers();
-  let listener: ((jobs: readonly Job[]) => void) | undefined;
-  const manager = {
-    subscribe(next: (jobs: readonly Job[]) => void) {
-      listener = next;
-      next([{ id: "job-1", state: "running" } as Job]);
-      return () => { listener = undefined; };
-    },
-    get() { throw new Error("manager accessed after shutdown"); },
-  } as unknown as JobManager;
-  const cleanup = installCompletionNotifier(pi as never, manager, timers);
-
-  listener?.([{ id: "job-1", state: "completed" } as Job]);
-  const capturedFlush = timers.pending[0];
-  assert.ok(capturedFlush);
-  cleanup();
-
-  assert.doesNotThrow(() => capturedFlush());
-  assert.equal(pi.messages.length, 0);
-  assert.equal(listener, undefined);
-  assert.deepEqual(timers.delays, [100]);
-  assert.equal(timers.pending.length, 0);
-});
-
-test("completion notifier listener captured before cleanup becomes a shutdown no-op", () => {
-  const pi = new FakePi();
-  const timers = new FakeTimers();
-  let listener: ((jobs: readonly Job[]) => void) | undefined;
-  const manager = {
-    subscribe(next: (jobs: readonly Job[]) => void) {
-      listener = next;
-      next([{ id: "job-1", state: "running" } as Job]);
-      return () => { listener = undefined; };
-    },
-  } as unknown as JobManager;
-  const cleanup = installCompletionNotifier(pi as never, manager, timers);
-  const capturedListener = listener;
-  assert.ok(capturedListener);
-
-  cleanup();
-  capturedListener([{ id: "job-1", state: "completed" } as Job]);
-
-  assert.equal(pi.messages.length, 0);
-  assert.equal(listener, undefined);
-  assert.deepEqual(timers.delays, []);
-  assert.equal(timers.pending.length, 0);
+  assert.equal(pi.sendAttempts, 0);
+  assert.equal(pi.messageRenderers.has("simple-subagents-ready"), false);
+  await pi.emit("session_shutdown", {}, fakeContext({ hasUI: false }, pi));
 });
 
 test("runtime loads config only from Pi's agent directory, never the project config directory", async () => {
@@ -1004,8 +754,6 @@ test("runtime loads config and profiles, surfaces diagnostics, confirms writable
       return { config: { confirmWrites: true }, warning: "config warning" };
     },
     discoverProfiles: async () => ({ agents: [{ ...profile, name: "writer" }], diagnostics: ["profile warning"] }),
-    setTimer: () => 1,
-    clearTimer: () => {},
   };
   createSimpleSubagentsExtension(dependencies)(pi as never);
   await pi.emit("session_start", {}, fakeContext({ hasUI: true }, pi));
@@ -1122,34 +870,13 @@ test("runtime reports writable confirmation requiring interactive UI when confir
   assert.equal(result.content[0]?.text, "Writable confirmation requires interactive UI.");
   assert.deepEqual(result.details.diagnostics, ["Writable confirmation requires interactive UI."]);
   assert.deepEqual(manager.list(), []);
-  assert.equal(pi.messageRenderers.has("simple-subagents-ready"), true);
   assert.ok(pi.tools.get("subagent_start")?.renderCall);
   assert.ok(pi.tools.get("subagent_start")?.renderResult);
 });
 
-class FakeTimers {
-  pending: Array<() => void> = [];
-  delays: number[] = [];
-  setTimer = (callback: () => void, delay: number): number => {
-    this.delays.push(delay);
-    this.pending.push(callback);
-    return this.pending.length;
-  };
-  clearTimer = (timer: number): void => {
-    this.pending.splice(timer - 1, 1);
-  };
-  runAll(): void {
-    const pending = this.pending.splice(0);
-    for (const callback of pending) callback();
-  }
-}
-
 class FakePi {
   readonly tools = new Map<string, any>();
   readonly handlers = new Map<string, Array<(event: unknown, ctx: any) => unknown>>();
-  readonly messages: Array<{ customType: string; content: string; display: boolean; details: unknown }> = [];
-  readonly messageOptions: unknown[] = [];
-  sendError: Error | undefined;
   sendAttempts = 0;
   readonly notifications: Array<[string, string]> = [];
   readonly confirmations: Array<[string, string]> = [];
@@ -1165,12 +892,6 @@ class FakePi {
   }
   async emit(event: string, payload: unknown, ctx: unknown): Promise<void> {
     for (const handler of this.handlers.get(event) ?? []) await handler(payload, ctx);
-  }
-  sendMessage(message: { customType: string; content: string; display: boolean; details: unknown }, options: unknown): void {
-    this.sendAttempts += 1;
-    if (this.sendError) throw this.sendError;
-    this.messages.push(message);
-    this.messageOptions.push(options);
   }
   registerMessageRenderer(type: string, renderer: unknown): void { this.messageRenderers.set(type, renderer); }
 }
