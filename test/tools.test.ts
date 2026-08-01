@@ -271,12 +271,12 @@ test("wait schema bounds IDs, condition, and timeout", () => {
   assert.equal(schema.properties.until.default, "all");
   assert.equal(schema.properties.timeoutMs.type, "integer");
   assert.equal(schema.properties.timeoutMs.minimum, 100);
-  assert.equal(schema.properties.timeoutMs.maximum, 30_000);
-  assert.equal(schema.properties.timeoutMs.default, 15_000);
+  assert.equal(schema.properties.timeoutMs.maximum, 300_000);
+  assert.equal(schema.properties.timeoutMs.default, 60_000);
   assert.equal(Check(WaitParams, { ids: ["job-1"], timeoutMs: 100 }), true);
-  assert.equal(Check(WaitParams, { ids: ["job-1"], timeoutMs: 30_000 }), true);
+  assert.equal(Check(WaitParams, { ids: ["job-1"], timeoutMs: 300_000 }), true);
   assert.equal(Check(WaitParams, { ids: ["job-1"], timeoutMs: 99 }), false);
-  assert.equal(Check(WaitParams, { ids: ["job-1"], timeoutMs: 30_001 }), false);
+  assert.equal(Check(WaitParams, { ids: ["job-1"], timeoutMs: 300_001 }), false);
   assert.equal(Check(WaitParams, { ids: ["job-1"], timeoutMs: 100.5 }), false);
 });
 
@@ -294,7 +294,7 @@ test("waitJobs applies defaults and returns only state snapshots", async () => {
     operation: "wait",
     outcome: "completed",
     until: "all",
-    timeoutMs: 15_000,
+    timeoutMs: 60_000,
     elapsedMs: result.details.elapsedMs,
     jobs: [{ id: "job-1", state: "completed" }],
   });
@@ -579,7 +579,7 @@ test("subagent_wait description limits use to one short near-completion wait", (
   const description = pi.tools.get("subagent_wait")?.description ?? "";
   assert.match(description, /expected to finish soon/i);
   assert.match(description, /no useful parent work/i);
-  assert.match(description, /at most 30 seconds/i);
+  assert.match(description, /at most 5 minutes/i);
   assert.match(description, /do not.*again immediately/i);
 });
 
@@ -691,7 +691,7 @@ test("registered tools expose strict schema boundaries and required guidance", (
   assert.equal(pi.tools.get("subagent_agents")?.parameters, AgentsParams);
   assert.ok(pi.tools.get("subagent_wait"));
   assert.equal(pi.tools.get("subagent_wait")?.parameters, WaitParams);
-  assert.match(pi.tools.get("subagent_wait")?.description ?? "", /at most 30 seconds/i);
+  assert.match(pi.tools.get("subagent_wait")?.description ?? "", /at most 5 minutes/i);
 });
 
 test("runtime does not register or emit automatic completion messages", async () => {
@@ -718,7 +718,7 @@ test("runtime does not register or emit automatic completion messages", async ()
   await new Promise((resolve) => setTimeout(resolve, 150));
 
   assert.equal(pi.sendAttempts, 0);
-  assert.equal(pi.messageRenderers.has("simple-subagents-ready"), false);
+  assert.equal(pi.messageRenderers.has(["simple", "subagents", "ready"].join("-")), false);
   await pi.emit("session_shutdown", {}, fakeContext({ hasUI: false }, pi));
 });
 

@@ -30,7 +30,11 @@ export const ControlParams = Type.Object({
 export const WaitParams = Type.Object({
   ids: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }),
   until: Type.Optional(StringEnum(["any", "all"] as const, { default: "all" })),
-  timeoutMs: Type.Optional(Type.Integer({ minimum: 100, maximum: 30_000, default: 15_000 })),
+  timeoutMs: Type.Optional(Type.Integer({
+    minimum: 100,
+    maximum: 300_000,
+    default: 60_000,
+  })),
 });
 
 export type StartInput = Static<typeof StartParams>;
@@ -157,7 +161,7 @@ export async function waitJobs(
   signal?: AbortSignal,
 ): Promise<ToolResponse> {
   const until: WaitUntil = input.until ?? "all";
-  const timeoutMs = input.timeoutMs ?? 15_000;
+  const timeoutMs = input.timeoutMs ?? 60_000;
   let result: WaitResult;
   try {
     result = await services.manager.waitFor({ ids: input.ids, until, timeoutMs, signal });
@@ -339,7 +343,7 @@ export function registerSubagentTools(pi: ExtensionAPI, services: ToolServices):
     label: "Wait for Subagents",
     description: [
       "Wait once for requested jobs only when they are expected to finish soon and no useful parent work can proceed meanwhile.",
-      "The wait lasts at most 30 seconds and returns current states without collecting output or cancelling jobs.",
+      "The wait lasts at most 5 minutes, returns as soon as the requested condition is satisfied, and never collects output or cancels jobs.",
       "After a timeout, do not call subagent_wait again immediately; continue other work or return control.",
     ].join(" "),
     parameters: WaitParams,

@@ -77,7 +77,7 @@ Jobs are read-only by default. The parent model can explicitly request write acc
 
 ## Limits and lifecycle
 
-`subagent_wait` is a short, event-driven pause for jobs expected to finish soon when no useful parent work can proceed. The parent cannot answer concurrently while the tool is waiting, so each call defaults to 15 seconds and lasts at most 30 seconds. A timeout returns current states without cancelling work; do not immediately wait again—continue other work or return control. Aborting the parent turn does not cancel subagents.
+`subagent_wait` is an event-driven pause for jobs expected to finish when no useful parent work can proceed. The parent cannot answer concurrently while the tool is waiting, so each call defaults to 60 seconds and lasts at most 5 minutes. The wait returns immediately when its requested jobs settle; the configured timeout is only an upper bound. A timeout returns current states without cancelling work; do not immediately wait again—continue other work or return control. Aborting the parent turn does not cancel subagents. When the parent is not waiting, use `subagent_status` or the dashboard to check progress.
 
 At most four jobs run at once, and a start or control batch accepts at most eight jobs. Collected output is capped at 50 KB. Cancel queued or running work from the tools or dashboard; session shutdown also cancels queued and active jobs before the extension closes.
 
