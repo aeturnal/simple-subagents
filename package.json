@@ -1,11 +1,17 @@
 {
   "name": "simple-subagents",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Lightweight background subagents for Pi",
   "type": "module",
-  "engines": { "node": ">=22.19.0" },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "exports": "./src/index.ts",
-  "keywords": ["pi-package", "pi", "subagents"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "subagents"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -15,9 +21,18 @@
   "bugs": {
     "url": "https://github.com/aeturnal/simple-subagents/issues"
   },
-  "publishConfig": { "access": "public" },
-  "files": ["src", "README.md"],
-  "pi": { "extensions": ["./src/index.ts"] },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
   "scripts": {
     "test": "tsx --test test/*.test.ts",
     "test:unit": "tsx --test test/config-agents.test.ts test/json-output.test.ts test/process-runner.test.ts test/job-manager.test.ts test/tools.test.ts test/dashboard.test.ts test/package.test.ts",
