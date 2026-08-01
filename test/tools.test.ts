@@ -878,6 +878,7 @@ class FakePi {
   readonly tools = new Map<string, any>();
   readonly handlers = new Map<string, Array<(event: unknown, ctx: any) => unknown>>();
   sendAttempts = 0;
+  sendMessage(): void { this.sendAttempts += 1; }
   readonly notifications: Array<[string, string]> = [];
   readonly confirmations: Array<[string, string]> = [];
   readonly messageRenderers = new Map<string, unknown>();
