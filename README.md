@@ -27,8 +27,6 @@ pi -e ./src/index.ts
 
 Ask Pi naturally: “start three parallel subagents to review the tests, dependencies, and docs”; “show subagent status”; “wait for job-1 and job-3”; “cancel job-2”; or “collect job-1 and job-3.” `/subagents` opens the interactive inbox: arrows select, Enter inspects, `c` cancels, `x` collects, `d` discards, and Escape closes.
 
-Completion notices are availability hints: a notified result may already have been collected or discarded by the time Pi processes the follow-up. Pi checks the job's current state and explicitly calls the normal collection tool only when an uncollected result is needed for the active task; otherwise no action or extra confirmation turn is required. A missed notice does not remove the result—uncollected results remain available through status and `/subagents` for the rest of the session.
-
 ## Agents and access
 
 The built-in `generic` profile is always available. Add user profiles at `~/.pi/agent/agents/*.md`; project-scoped profiles are intentionally ignored. Profiles use frontmatter followed by the subagent’s system prompt:

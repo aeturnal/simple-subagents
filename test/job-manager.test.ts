@@ -1095,8 +1095,8 @@ test("waitFor installs the configured minimum and maximum timeout delays", async
   const maximumAbort = new AbortController();
 
   const minimum = manager.waitFor({ ids: [job.id], until: "all", timeoutMs: 100, signal: minimumAbort.signal });
-  const maximum = manager.waitFor({ ids: [job.id], until: "all", timeoutMs: 30_000, signal: maximumAbort.signal });
-  assert.deepEqual([...clock.timers.values()].map(({ delay }) => delay), [100, 30_000]);
+  const maximum = manager.waitFor({ ids: [job.id], until: "all", timeoutMs: 300_000, signal: maximumAbort.signal });
+  assert.deepEqual([...clock.timers.values()].map(({ delay }) => delay), [100, 300_000]);
 
   minimumAbort.abort();
   maximumAbort.abort();
