@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth, type Component, visibleWidth } from "@earendil-works/pi-tui";
+import { Key, matchesKey, truncateToWidth, type Component, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { boundedPreview, projectJobStatus, type JobStatus } from "./job-status.js";
 import { JobManager } from "./job-manager.js";
 import type { Job, JobState } from "./types.js";
@@ -7,6 +7,7 @@ import type { Job, JobState } from "./types.js";
 type DashboardTheme = { fg(color: "accent" | "dim" | "error" | "muted" | "success" | "warning", text: string): string; bold(text: string): string };
 
 type AttentionCounts = { queued: number; running: number; ready: number };
+type DashboardMode = "list" | "compact";
 type JobRecord = { kind: "job"; id: string; state: JobState; status: JobStatus };
 type ListRecord = { kind: "heading"; label: string } | JobRecord;
 
@@ -54,6 +55,7 @@ export interface SubagentsDashboardOptions {
 export class SubagentsDashboard implements Component {
   private jobs: readonly Job[];
   private selected = 0;
+  private mode: DashboardMode = "list";
   private listOffset = 0;
   private cachedWidth: number | undefined;
   private cachedRows: number | undefined;
@@ -81,6 +83,7 @@ export class SubagentsDashboard implements Component {
     const jobs = this.visibleJobs();
     if (matchesKey(data, Key.up) && this.selected > 0) this.selected -= 1;
     else if (matchesKey(data, Key.down) && this.selected < jobs.length - 1) this.selected += 1;
+    else if (matchesKey(data, Key.enter) && jobs[this.selected]) this.mode = this.mode === "list" ? "compact" : "list";
     else if (matchesKey(data, Key.escape)) {
       this.dispose();
       this.options.close();
@@ -110,19 +113,11 @@ export class SubagentsDashboard implements Component {
     const records = this.records();
     const jobs = records.filter((record): record is JobRecord => record.kind === "job");
     this.selected = Math.min(this.selected, Math.max(0, jobs.length - 1));
-    const selectedId = jobs[this.selected]?.id;
-    const selectedRecord = records.findIndex((record) => record.kind === "job" && record.id === selectedId);
     const bodyRows = Math.max(0, rows - 2);
-    const maxOffset = Math.max(0, records.length - bodyRows);
-    if (selectedRecord >= 0 && selectedRecord < this.listOffset) this.listOffset = selectedRecord;
-    else if (selectedRecord >= this.listOffset + bodyRows) this.listOffset = selectedRecord - bodyRows + 1;
-    this.listOffset = Math.min(Math.max(0, this.listOffset), maxOffset);
-
-    const body = records.slice(this.listOffset, this.listOffset + bodyRows).map((record) => record.kind === "heading"
-      ? line(this.options.theme.fg("dim", record.label))
-      : this.row(record.status, record.id === selectedId, width));
-    if (body.length === 0 && records.length === 0 && bodyRows > 0) body.push(line(this.options.theme.fg("dim", "No subagent jobs.")));
-    return this.cache(width, rows, [title, ...body, line("↑↓ select · c cancel · esc close")]);
+    const body = this.mode === "compact"
+      ? this.compactBody(jobs[this.selected], width, bodyRows)
+      : this.listBody(records, jobs[this.selected]?.id, width, bodyRows);
+    return this.cache(width, rows, [title, ...body.map(line), line("↑↓ select · enter inspect · c cancel · esc close")]);
   }
 
   invalidate(): void {
@@ -155,6 +150,49 @@ export class SubagentsDashboard implements Component {
       ["INBOX", jobs.filter((job) => isInbox(job.state)).map((job) => ({ kind: "job", ...job }))],
     ];
     return groups.flatMap(([label, records]) => records.length === 0 ? [] : [{ kind: "heading", label }, ...records]);
+  }
+
+  private listBody(records: ListRecord[], selectedId: string | undefined, width: number, bodyRows: number): string[] {
+    const selectedRecord = records.findIndex((record) => record.kind === "job" && record.id === selectedId);
+    const maxOffset = Math.max(0, records.length - bodyRows);
+    if (selectedRecord >= 0 && selectedRecord < this.listOffset) this.listOffset = selectedRecord;
+    else if (selectedRecord >= this.listOffset + bodyRows) this.listOffset = selectedRecord - bodyRows + 1;
+    this.listOffset = Math.min(Math.max(0, this.listOffset), maxOffset);
+
+    const body = records.slice(this.listOffset, this.listOffset + bodyRows).map((record) => record.kind === "heading"
+      ? this.options.theme.fg("dim", record.label)
+      : this.row(record.status, record.id === selectedId, width));
+    if (body.length === 0 && records.length === 0 && bodyRows > 0) body.push(this.options.theme.fg("dim", "No subagent jobs."));
+    return body;
+  }
+
+  private compactBody(selected: JobRecord | undefined, width: number, bodyRows: number): string[] {
+    if (!selected) return bodyRows > 0 ? [this.options.theme.fg("dim", "No subagent jobs.")] : [];
+    const status = selected.status;
+    const timestamp = (value: number | undefined, absent: string): string => value === undefined ? absent : new Date(value).toISOString();
+    const duration = (value: number | undefined): string => value === undefined ? "Not recorded" : durationText(value);
+    const activity = status.recentActivity.length === 0
+      ? ["Recent activity: No activity reported yet"]
+      : ["Recent activity:", ...status.recentActivity.flatMap((item) => wrapTextWithAnsi(`  ${new Date(item.timestamp).toISOString()} ${item.kind}: ${item.summary}`, Math.max(1, width)))];
+    const lines = [
+      this.row(status, true, width),
+      ...wrapTextWithAnsi(`Task: ${status.task}`, Math.max(1, width)),
+      `Agent: ${status.agent} · Access: ${status.access}`,
+      `Launch model: ${status.launchModel ?? "model or Pi default"}`,
+      `Reported model: ${status.reportedModel ?? "Not reported"}`,
+      `Created: ${timestamp(status.createdAt, "Not recorded")}`,
+      `Started: ${timestamp(status.startedAt, "Not started")}`,
+      `Finished: ${timestamp(status.finishedAt, "Not finished")}`,
+      `Queue: ${duration(status.queueDurationMs)}`,
+      `Run: ${duration(status.runDurationMs)}`,
+      `Usage: input ${status.usage.input}, output ${status.usage.output}, cache read ${status.usage.cacheRead}, cache write ${status.usage.cacheWrite}, cost ${status.usage.cost}, turns ${status.usage.turns}`,
+      ...activity,
+      `Capture: ${status.captureNotices.length ? status.captureNotices.join(" · ") : "none"}`,
+      `Error: ${status.hasError ? "reported" : "none"}`,
+    ];
+    if (lines.length <= bodyRows) return lines;
+    if (bodyRows === 0) return [];
+    return [...lines.slice(0, bodyRows - 1), `… ${lines.length - bodyRows + 1} compact lines omitted`];
   }
 
   private row(status: JobStatus, selected: boolean, width: number): string {

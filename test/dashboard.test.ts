@@ -180,16 +180,52 @@ test("cancellation but no collection controls affect the selected job", async (t
   assert.deepEqual(pi.messages, []);
 });
 
-test("list navigation preserves the selected identity across a manager update", (t) => {
-  const manager = new FakeManager([job("running", "running"), job("queued", "queued"), job("ready", "completed")]);
+test("compact details use shared status facts and exclude raw captures", (t) => {
+  const pi = new FakePi();
+  const view = dashboard(new FakeManager([job("job-1", "failed", {
+    launchModel: "gpt-5.6-terra",
+    model: "gpt-5.6-sol",
+    output: "SECRET_OUTPUT_DO_NOT_SHOW",
+    stderr: "SECRET_STDERR_DO_NOT_SHOW",
+    errorMessage: "SECRET_ERROR_DO_NOT_SHOW",
+    malformedEventSamples: ["SECRET_MALFORMED_SAMPLE_DO_NOT_SHOW"],
+    outputTruncation: { originalBytes: 1_000, keptBytes: 500 },
+    progress: [
+      { type: "text", text: "Completed safe status update", timestamp: 2_500 },
+      { type: "tool", text: "Started safe tool", timestamp: 2_600 },
+      { type: "diagnostic", text: "Safe diagnostic", timestamp: 2_700 },
+    ],
+  })]), pi);
+  t.after(() => view.dispose());
+
+  view.handleInput?.("\r");
+  const lines = view.render(120);
+  const text = plain(lines.join("\n"));
+
+  for (const line of lines) assert.ok(visibleWidth(line) <= 120, `${visibleWidth(line)} > 120: ${line}`);
+  assert.ok(lines.length <= pi.ui.rows);
+  for (const label of ["Task:", "Agent:", "Access:", "Launch model:", "Reported model:", "Created:", "Queue:", "Run:", "Usage:", "Recent activity:"]) {
+    assert.match(text, new RegExp(label));
+  }
+  for (const secret of ["SECRET_OUTPUT_DO_NOT_SHOW", "SECRET_STDERR_DO_NOT_SHOW", "SECRET_ERROR_DO_NOT_SHOW", "SECRET_MALFORMED_SAMPLE_DO_NOT_SHOW"]) {
+    assert.doesNotMatch(text, new RegExp(secret));
+  }
+  assert.match(text, /enter inspect/);
+  assert.doesNotMatch(text, /v full/);
+});
+
+test("preserves selected identity across snapshots and selects the nearest visible job", (t) => {
+  const manager = new FakeManager([job("job-1", "running"), job("job-2", "running"), job("job-3", "running")]);
   const view = dashboard(manager);
   t.after(() => view.dispose());
 
   view.handleInput?.("\x1b[B");
-  manager.setJobs([job("ready", "completed"), job("queued", "queued"), job("running", "running")]);
-  view.setJobs(manager.list());
+  view.setJobs([job("job-3", "running"), job("job-2", "running"), job("job-1", "running")]);
+  assert.match(render(view), /> job-2 /);
 
-  assert.match(render(view), /> running/);
+  view.handleInput?.("\r");
+  view.setJobs([job("job-3", "running"), job("job-1", "running")]);
+  assert.match(render(view), /Task: Task for job-1/);
 });
 
 test("dashboard reports a failed cancellation and closes on escape", async (t) => {
