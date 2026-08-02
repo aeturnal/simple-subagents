@@ -12,7 +12,7 @@
 
 - Preserve the existing five tools and the existing `{}` / `{ id }` `subagent_status` inputs.
 - `subagent_wait` stays state-only; do not change its schema, payload, timing, or event-driven behavior.
-- Complete output, partial assistant prose, stderr, errors, malformed samples, and profile prompts must not enter model-visible status text.
+- Complete output, complete partial assistant prose, stderr, errors, malformed samples, and profile prompts must not enter model-visible status text; a short sanitized assistant activity preview is allowed.
 - Single-job status contains at most `3` independently bounded recent activity items.
 - All-job status contains at most `20` jobs, ordered as active, collectable, then collected/discarded history, with stable manager order inside each group.
 - Every model-visible status response remains below the existing `50 KiB` boundary.
