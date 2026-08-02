@@ -32,13 +32,14 @@ class FakeManager {
   jobs: Job[];
   readonly listeners = new Set<(jobs: readonly Job[]) => void>();
   readonly calls: string[] = [];
+  listCalls = 0;
   unsubscribeCalls = 0;
   shutdownCalls = 0;
   cancelError: Error | undefined;
 
   constructor(jobs: Job[] = []) { this.jobs = jobs; }
   currentTime(): number { return 10_000; }
-  list(): readonly Job[] { return structuredClone(this.jobs); }
+  list(): readonly Job[] { this.listCalls += 1; return structuredClone(this.jobs); }
   subscribe(listener: (jobs: readonly Job[]) => void): () => void {
     this.listeners.add(listener);
     listener(this.list());
@@ -147,6 +148,19 @@ test("list mode never exceeds its terminal row and width budget", (t) => {
   }
 });
 
+test("list mode keeps a selection beyond the row budget in the viewport", (t) => {
+  const pi = new FakePi();
+  pi.ui.rows = 4;
+  const view = dashboard(new FakeManager(Array.from({ length: 30 }, (_, index) => job(`job-${index + 1}`, "running"))), pi);
+  t.after(() => view.dispose());
+
+  for (let index = 0; index < 15; index += 1) view.handleInput?.("\x1b[B");
+
+  const lines = view.render(100);
+  assert.ok(lines.length <= 4);
+  assert.ok(lines.some((line) => plain(line).startsWith("> job-16 ")));
+});
+
 test("cancellation but no collection controls affect the selected job", async (t) => {
   const pi = new FakePi();
   const manager = new FakeManager([job("job-1", "queued"), job("job-2", "running"), job("job-3", "completed")]);
@@ -185,8 +199,12 @@ test("dashboard reports a failed cancellation and closes on escape", async (t) =
   const view = dashboard(manager, pi);
   t.after(() => view.dispose());
 
+  const listCallsBeforeCancellation = manager.listCalls;
+  manager.setJobs([job("job-1", "completed")]);
   view.handleInput?.("c");
   await nextTurn();
+  assert.equal(manager.listCalls, listCallsBeforeCancellation + 1);
+  assert.match(render(view), /> job-1 completed/);
   assert.deepEqual(pi.ui.notifications, [["Could not cancel subagent job.", "error"]]);
 
   view.handleInput?.("\x1b");
