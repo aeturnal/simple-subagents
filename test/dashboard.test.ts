@@ -211,7 +211,74 @@ test("compact details use shared status facts and exclude raw captures", (t) => 
     assert.doesNotMatch(text, new RegExp(secret));
   }
   assert.match(text, /enter inspect/);
-  assert.doesNotMatch(text, /v full/);
+  assert.match(text, /v full/);
+});
+
+test("full metadata viewport is bounded by rows and width while excluding raw captures", (t) => {
+  const pi = new FakePi();
+  pi.ui.rows = 10;
+  const view = dashboard(new FakeManager([job("job-1", "completed", {
+    output: "SECRET_OUTPUT_DO_NOT_SHOW",
+    stderr: "SECRET_STDERR_DO_NOT_SHOW",
+    errorMessage: "SECRET_ERROR_DO_NOT_SHOW",
+    malformedEventSamples: ["SECRET_MALFORMED_SAMPLE_DO_NOT_SHOW"],
+    outputTruncation: { originalBytes: 1_000, keptBytes: 500 },
+  })]), pi);
+  t.after(() => view.dispose());
+
+  view.handleInput?.("v");
+  const lines = view.render(120);
+  const text = plain(lines.join("\n"));
+
+  assert.ok(lines.length <= pi.ui.rows);
+  assert.equal(plain(lines[0] ?? ""), "Subagent job-1 · full view");
+  assert.match(plain(lines.at(-1) ?? ""), /^lines 1–8 of \d+ · ↑↓ line · PgUp\/PgDn page · Home\/End · v\/esc back$/);
+  for (const secret of ["SECRET_OUTPUT_DO_NOT_SHOW", "SECRET_STDERR_DO_NOT_SHOW", "SECRET_ERROR_DO_NOT_SHOW", "SECRET_MALFORMED_SAMPLE_DO_NOT_SHOW"]) {
+    assert.doesNotMatch(text, new RegExp(secret));
+  }
+  for (const width of [24, 60, 120]) for (const line of view.render(width)) assert.ok(visibleWidth(line) <= width, `${visibleWidth(line)} > ${width}: ${line}`);
+});
+
+test("full navigation returns to its prior view without closing the dashboard", (t) => {
+  const pi = new FakePi();
+  pi.ui.rows = 10;
+  const view = dashboard(new FakeManager([job("job-1", "completed")]), pi);
+  t.after(() => view.dispose());
+
+  view.handleInput?.("v");
+  const firstFooter = plain(view.render(120).at(-1) ?? "");
+  view.handleInput?.("\x1b[6~");
+  assert.notEqual(plain(view.render(120).at(-1) ?? ""), firstFooter);
+  view.handleInput?.("\x1b[F");
+  const lastFooter = plain(view.render(120).at(-1) ?? "");
+  assert.notEqual(lastFooter, firstFooter);
+  view.handleInput?.("\x1b[H");
+  assert.equal(plain(view.render(120).at(-1) ?? ""), firstFooter);
+  view.handleInput?.("\x1b");
+  assert.match(render(view), /> job-1 completed/);
+
+  view.handleInput?.("\r");
+  view.handleInput?.("v");
+  view.handleInput?.("v");
+  assert.match(render(view), /Task: Task for job-1/);
+  assert.equal(pi.ui.doneCalls, 0);
+});
+
+test("full reconciliation returns to list with the nearest selection and reset viewport", (t) => {
+  const pi = new FakePi();
+  pi.ui.rows = 10;
+  const view = dashboard(new FakeManager([job("job-1", "completed"), job("job-2", "completed"), job("job-3", "completed")]), pi);
+  t.after(() => view.dispose());
+
+  view.handleInput?.("\x1b[B");
+  view.handleInput?.("v");
+  view.handleInput?.("\x1b[F");
+  view.setJobs([job("job-1", "completed"), job("job-3", "completed")]);
+
+  const state = view as unknown as { mode: string; fullOffset: number };
+  assert.equal(state.mode, "list");
+  assert.equal(state.fullOffset, 0);
+  assert.match(render(view), /> job-3 completed/);
 });
 
 test("preserves selected identity across snapshots and selects the nearest visible job", (t) => {

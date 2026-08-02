@@ -7,7 +7,8 @@ import type { Job, JobState } from "./types.js";
 type DashboardTheme = { fg(color: "accent" | "dim" | "error" | "muted" | "success" | "warning", text: string): string; bold(text: string): string };
 
 type AttentionCounts = { queued: number; running: number; ready: number };
-type DashboardMode = "list" | "compact";
+type DashboardMode = "list" | "compact" | "full";
+type ReturnMode = Exclude<DashboardMode, "full">;
 type JobRecord = { kind: "job"; id: string; state: JobState; status: JobStatus };
 type ListRecord = { kind: "heading"; label: string } | JobRecord;
 
@@ -57,6 +58,8 @@ export class SubagentsDashboard implements Component {
   private selected = 0;
   private mode: DashboardMode = "list";
   private listOffset = 0;
+  private fullReturnMode: ReturnMode = "list";
+  private fullOffset = 0;
   private cachedWidth: number | undefined;
   private cachedRows: number | undefined;
   private cachedLines: string[] | undefined;
@@ -76,15 +79,28 @@ export class SubagentsDashboard implements Component {
     const visible = this.visibleJobs();
     const preservedIndex = selectedId === undefined ? -1 : visible.findIndex((job) => job.id === selectedId);
     this.selected = preservedIndex >= 0 ? preservedIndex : Math.min(priorIndex, Math.max(0, visible.length - 1));
+    if (this.mode === "full" && preservedIndex < 0) {
+      this.mode = "list";
+      this.fullOffset = 0;
+    }
     this.changed();
   }
 
   handleInput(data: string): void {
+    if (this.mode === "full") {
+      this.handleFullInput(data);
+      return;
+    }
+
     const jobs = this.visibleJobs();
     if (matchesKey(data, Key.up) && this.selected > 0) this.selected -= 1;
     else if (matchesKey(data, Key.down) && this.selected < jobs.length - 1) this.selected += 1;
     else if (matchesKey(data, Key.enter) && jobs[this.selected]) this.mode = this.mode === "list" ? "compact" : "list";
-    else if (matchesKey(data, Key.escape)) {
+    else if (matchesKey(data, "v") && jobs[this.selected]) {
+      this.fullReturnMode = this.mode;
+      this.mode = "full";
+      this.fullOffset = 0;
+    } else if (matchesKey(data, Key.escape)) {
       this.dispose();
       this.options.close();
       return;
@@ -106,18 +122,23 @@ export class SubagentsDashboard implements Component {
     if (this.cachedWidth === width && this.cachedRows === rows && this.cachedLines) return this.cachedLines;
 
     const line = (value: string): string => truncateToWidth(value, width);
+    const records = this.records();
+    const jobs = records.filter((record): record is JobRecord => record.kind === "job");
+    this.selected = Math.min(this.selected, Math.max(0, jobs.length - 1));
+    if (this.mode === "full" && !jobs[this.selected]) {
+      this.mode = "list";
+      this.fullOffset = 0;
+    }
+    if (this.mode === "full") return this.cache(width, rows, this.fullFrame(jobs[this.selected]!, width, rows));
     if (rows === 0) return this.cache(width, rows, []);
     const title = line(this.options.theme.bold("Subagents"));
     if (rows === 1) return this.cache(width, rows, [title]);
 
-    const records = this.records();
-    const jobs = records.filter((record): record is JobRecord => record.kind === "job");
-    this.selected = Math.min(this.selected, Math.max(0, jobs.length - 1));
     const bodyRows = Math.max(0, rows - 2);
     const body = this.mode === "compact"
       ? this.compactBody(jobs[this.selected], width, bodyRows)
       : this.listBody(records, jobs[this.selected]?.id, width, bodyRows);
-    return this.cache(width, rows, [title, ...body.map(line), line("↑↓ select · enter inspect · c cancel · esc close")]);
+    return this.cache(width, rows, [title, ...body.map(line), line("↑↓ select · enter inspect · v full · c cancel · esc close")]);
   }
 
   invalidate(): void {
@@ -150,6 +171,61 @@ export class SubagentsDashboard implements Component {
       ["INBOX", jobs.filter((job) => isInbox(job.state)).map((job) => ({ kind: "job", ...job }))],
     ];
     return groups.flatMap(([label, records]) => records.length === 0 ? [] : [{ kind: "heading", label }, ...records]);
+  }
+
+  private handleFullInput(data: string): void {
+    if (matchesKey(data, Key.up)) this.fullOffset = Math.max(0, this.fullOffset - 1);
+    else if (matchesKey(data, Key.down)) this.fullOffset += 1;
+    else if (matchesKey(data, Key.pageUp)) this.fullOffset = Math.max(0, this.fullOffset - Math.max(1, this.options.terminalRows() - 2));
+    else if (matchesKey(data, Key.pageDown)) this.fullOffset += Math.max(1, this.options.terminalRows() - 2);
+    else if (matchesKey(data, Key.home)) this.fullOffset = 0;
+    else if (matchesKey(data, Key.end)) this.fullOffset = Number.MAX_SAFE_INTEGER;
+    else if (matchesKey(data, "v") || matchesKey(data, Key.escape)) {
+      this.mode = this.fullReturnMode;
+      this.fullOffset = 0;
+    } else return;
+    this.changed();
+  }
+
+  private fullFrame(selected: JobRecord, width: number, rows: number): string[] {
+    const line = (value: string): string => truncateToWidth(value, width);
+    const title = line(this.options.theme.bold(`Subagent ${selected.id} · full view`));
+    if (rows === 0) return [];
+    if (rows === 1) return [title];
+
+    const content = this.fullMetadata(selected.status, width);
+    const bodyRows = Math.max(0, rows - 2);
+    const maxOffset = Math.max(0, content.length - bodyRows);
+    this.fullOffset = Math.min(Math.max(0, this.fullOffset), maxOffset);
+    const body = content.slice(this.fullOffset, this.fullOffset + bodyRows);
+    const start = bodyRows === 0 || content.length === 0 ? 0 : this.fullOffset + 1;
+    const end = bodyRows === 0 ? 0 : Math.min(content.length, this.fullOffset + body.length);
+    const footer = `lines ${start}–${end} of ${content.length} · ↑↓ line · PgUp/PgDn page · Home/End · v/esc back`;
+    return [title, ...body.map(line), line(footer)];
+  }
+
+  private fullMetadata(status: JobStatus, width: number): string[] {
+    const timestamp = (value: number | undefined, absent: string): string => value === undefined ? absent : new Date(value).toISOString();
+    const duration = (value: number | undefined): string => value === undefined ? "Not recorded" : durationText(value);
+    const activity = status.recentActivity.length === 0
+      ? ["Recent activity: No activity reported yet"]
+      : ["Recent activity:", ...status.recentActivity.flatMap((item) => wrapTextWithAnsi(`  ${new Date(item.timestamp).toISOString()} ${item.kind}: ${item.summary}`, Math.max(1, width)))];
+    return [
+      this.row(status, true, width),
+      ...wrapTextWithAnsi(`Task: ${status.task}`, Math.max(1, width)),
+      `Agent: ${status.agent} · Access: ${status.access}`,
+      `Launch model: ${status.launchModel ?? "model or Pi default"}`,
+      `Reported model: ${status.reportedModel ?? "Not reported"}`,
+      `Created: ${timestamp(status.createdAt, "Not recorded")}`,
+      `Started: ${timestamp(status.startedAt, "Not started")}`,
+      `Finished: ${timestamp(status.finishedAt, "Not finished")}`,
+      `Queue: ${duration(status.queueDurationMs)}`,
+      `Run: ${duration(status.runDurationMs)}`,
+      `Usage: input ${status.usage.input}, output ${status.usage.output}, cache read ${status.usage.cacheRead}, cache write ${status.usage.cacheWrite}, cost ${status.usage.cost}, turns ${status.usage.turns}`,
+      ...activity,
+      `Capture: ${status.captureNotices.length ? status.captureNotices.join(" · ") : "none"}`,
+      `Error: ${status.hasError ? "reported" : "none"}`,
+    ].map((value) => truncateToWidth(value, width));
   }
 
   private listBody(records: ListRecord[], selectedId: string | undefined, width: number, bodyRows: number): string[] {
