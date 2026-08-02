@@ -239,6 +239,45 @@ test("full metadata viewport is bounded by rows and width while excluding raw ca
   for (const width of [24, 60, 120]) for (const line of view.render(width)) assert.ok(visibleWidth(line) <= width, `${visibleWidth(line)} > ${width}: ${line}`);
 });
 
+test("full title uses the projected job status ID", (t) => {
+  const pi = new FakePi();
+  const view = dashboard(new FakeManager([job("job-1\twith\runsafe controls", "completed")]), pi);
+  t.after(() => view.dispose());
+
+  view.handleInput?.("v");
+
+  assert.equal(plain(view.render(120)[0] ?? ""), "Subagent job-1 withunsafe controls · full view");
+});
+
+test("full metadata wraps each labeled field before truncation", (t) => {
+  const pi = new FakePi();
+  pi.ui.rows = 200;
+  const view = dashboard(new FakeManager([job("job-1", "failed", {
+    request: { task: "Task for job-1", agent: "agent-AGENT_VALUE_END", writeAccess: true },
+    profile: { name: "agent-AGENT_VALUE_END", description: "Reviews code", systemPrompt: "Review carefully.", source: "user" },
+    launchModel: "launch-model-LAUNCH_VALUE_END",
+    model: "reported-model-REPORTED_VALUE_END",
+    usage: { input: 123456789, output: 987654321, cacheRead: 111111111, cacheWrite: 222222222, cost: 333333333, turns: 444444444 },
+    outputTruncation: { originalBytes: 999999999, keptBytes: 111111111 },
+  })]), pi);
+  t.after(() => view.dispose());
+
+  view.handleInput?.("v");
+  const textWithoutWraps = plain(view.render(12).join("")).replace(/\s+/g, "");
+
+  for (const value of [
+    "Agent: agent-AGENT_VALUE_END",
+    "Access: write",
+    "Launch model: launch-model-LAUNCH_VALUE_END",
+    "Reported model: reported-model-REPORTED_VALUE_END",
+    "Created: 1970-01-01T00:00:01.000Z",
+    "Finished: 1970-01-01T00:00:03.000Z",
+    "Usage: input 123456789, output 987654321, cache read 111111111, cache write 222222222, cost 333333333, turns 444444444",
+    "Capture: Output capture truncated: retained 111111111 of 999999999 bytes.",
+    "Error: reported",
+  ]) assert.ok(textWithoutWraps.includes(value.replace(/\s+/g, "")), `missing wrapped metadata: ${value}`);
+});
+
 test("full navigation returns to its prior view without closing the dashboard", (t) => {
   const pi = new FakePi();
   pi.ui.rows = 10;

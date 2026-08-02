@@ -189,7 +189,7 @@ export class SubagentsDashboard implements Component {
 
   private fullFrame(selected: JobRecord, width: number, rows: number): string[] {
     const line = (value: string): string => truncateToWidth(value, width);
-    const title = line(this.options.theme.bold(`Subagent ${selected.id} · full view`));
+    const title = line(this.options.theme.bold(`Subagent ${selected.status.id} · full view`));
     if (rows === 0) return [];
     if (rows === 1) return [title];
 
@@ -207,24 +207,26 @@ export class SubagentsDashboard implements Component {
   private fullMetadata(status: JobStatus, width: number): string[] {
     const timestamp = (value: number | undefined, absent: string): string => value === undefined ? absent : new Date(value).toISOString();
     const duration = (value: number | undefined): string => value === undefined ? "Not recorded" : durationText(value);
+    const labeledField = (label: string, value: string): string[] => wrapTextWithAnsi(`${label}: ${value}`, Math.max(1, width));
     const activity = status.recentActivity.length === 0
-      ? ["Recent activity: No activity reported yet"]
-      : ["Recent activity:", ...status.recentActivity.flatMap((item) => wrapTextWithAnsi(`  ${new Date(item.timestamp).toISOString()} ${item.kind}: ${item.summary}`, Math.max(1, width)))];
+      ? labeledField("Recent activity", "No activity reported yet")
+      : status.recentActivity.flatMap((item) => labeledField("Recent activity", `${new Date(item.timestamp).toISOString()} ${item.kind}: ${item.summary}`));
     return [
-      this.row(status, true, width),
-      ...wrapTextWithAnsi(`Task: ${status.task}`, Math.max(1, width)),
-      `Agent: ${status.agent} · Access: ${status.access}`,
-      `Launch model: ${status.launchModel ?? "model or Pi default"}`,
-      `Reported model: ${status.reportedModel ?? "Not reported"}`,
-      `Created: ${timestamp(status.createdAt, "Not recorded")}`,
-      `Started: ${timestamp(status.startedAt, "Not started")}`,
-      `Finished: ${timestamp(status.finishedAt, "Not finished")}`,
-      `Queue: ${duration(status.queueDurationMs)}`,
-      `Run: ${duration(status.runDurationMs)}`,
-      `Usage: input ${status.usage.input}, output ${status.usage.output}, cache read ${status.usage.cacheRead}, cache write ${status.usage.cacheWrite}, cost ${status.usage.cost}, turns ${status.usage.turns}`,
+      ...labeledField("Status", `${status.id} ${stateText(status)}`),
+      ...labeledField("Task", status.task),
+      ...labeledField("Agent", status.agent),
+      ...labeledField("Access", status.access),
+      ...labeledField("Launch model", status.launchModel ?? "model or Pi default"),
+      ...labeledField("Reported model", status.reportedModel ?? "Not reported"),
+      ...labeledField("Created", timestamp(status.createdAt, "Not recorded")),
+      ...labeledField("Started", timestamp(status.startedAt, "Not started")),
+      ...labeledField("Finished", timestamp(status.finishedAt, "Not finished")),
+      ...labeledField("Queue", duration(status.queueDurationMs)),
+      ...labeledField("Run", duration(status.runDurationMs)),
+      ...labeledField("Usage", `input ${status.usage.input}, output ${status.usage.output}, cache read ${status.usage.cacheRead}, cache write ${status.usage.cacheWrite}, cost ${status.usage.cost}, turns ${status.usage.turns}`),
       ...activity,
-      `Capture: ${status.captureNotices.length ? status.captureNotices.join(" · ") : "none"}`,
-      `Error: ${status.hasError ? "reported" : "none"}`,
+      ...labeledField("Capture", status.captureNotices.length ? status.captureNotices.join(" · ") : "none"),
+      ...labeledField("Error", status.hasError ? "reported" : "none"),
     ].map((value) => truncateToWidth(value, width));
   }
 
