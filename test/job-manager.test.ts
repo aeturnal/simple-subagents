@@ -169,6 +169,15 @@ class ThrowingRunner implements ProcessRunner {
   }
 }
 
+test("exposes the injected clock value", () => {
+  let now = 123;
+  const manager = new JobManager({ runner: new ControlledRunner(), now: () => now });
+
+  assert.equal(manager.currentTime(), 123);
+  now = 456;
+  assert.equal(manager.currentTime(), 456);
+});
+
 test("starts no more than the default four jobs and pumps FIFO when a slot opens", async () => {
   const runner = new ControlledRunner();
   const manager = new JobManager({ runner, now: () => 100 });

@@ -141,6 +141,10 @@ export class JobManager {
     return entry ? this.snapshot(entry.job) : undefined;
   }
 
+  currentTime(): number {
+    return this.now();
+  }
+
   async cancel(id: string): Promise<Job> {
     const entry = this.requireJob(id);
     if (this.isTerminal(entry.job.state)) return this.snapshot(entry.job);
