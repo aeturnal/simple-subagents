@@ -214,7 +214,7 @@ test("compact details use shared status facts and exclude raw captures", (t) => 
   assert.match(text, /v full/);
 });
 
-test("full metadata viewport is bounded by rows and width while excluding raw captures", (t) => {
+test("full metadata viewport is bounded by rows and width while showing raw captures only in full view", (t) => {
   const pi = new FakePi();
   pi.ui.rows = 10;
   const view = dashboard(new FakeManager([job("job-1", "completed", {
@@ -227,16 +227,83 @@ test("full metadata viewport is bounded by rows and width while excluding raw ca
   t.after(() => view.dispose());
 
   view.handleInput?.("v");
+  view.handleInput?.("\x1b[F");
   const lines = view.render(120);
   const text = plain(lines.join("\n"));
 
   assert.ok(lines.length <= pi.ui.rows);
   assert.equal(plain(lines[0] ?? ""), "Subagent job-1 · full view");
-  assert.match(plain(lines.at(-1) ?? ""), /^lines 1–8 of \d+ · ↑↓ line · PgUp\/PgDn page · Home\/End · v\/esc back$/);
-  for (const secret of ["SECRET_OUTPUT_DO_NOT_SHOW", "SECRET_STDERR_DO_NOT_SHOW", "SECRET_ERROR_DO_NOT_SHOW", "SECRET_MALFORMED_SAMPLE_DO_NOT_SHOW"]) {
-    assert.doesNotMatch(text, new RegExp(secret));
-  }
+  assert.match(plain(lines.at(-1) ?? ""), /^lines \d+–\d+ of \d+ · ↑↓ line · PgUp\/PgDn page · Home\/End · v\/esc back$/);
+  assert.match(text, /SECRET_OUTPUT_DO_NOT_SHOW/);
   for (const width of [24, 60, 120]) for (const line of view.render(width)) assert.ok(visibleWidth(line) <= width, `${visibleWidth(line)} > ${width}: ${line}`);
+});
+
+test("full view pages through maximum captured output", (t) => {
+  const pi = new FakePi();
+  pi.ui.rows = 10;
+  const output = Array.from({ length: 1_400 }, (_, index) => `captured output line ${index + 1}`).join("\n");
+  const view = dashboard(new FakeManager([job("job-1", "completed", { output })]), pi);
+  t.after(() => view.dispose());
+
+  view.handleInput?.("v");
+  const initial = view.render(48);
+  assert.ok(initial.length <= pi.ui.rows);
+  assert.match(plain(initial.at(-1) ?? ""), /^lines 1–8 of \d+/);
+
+  view.handleInput?.("\x1b[F");
+  const final = view.render(48);
+  assert.ok(final.length <= pi.ui.rows);
+  assert.match(plain(final.join("\n")), /captured output line 1400/);
+  for (const line of final) assert.ok(visibleWidth(line) <= 48, `${visibleWidth(line)} > 48: ${line}`);
+});
+
+test("full view strips cursor controls from captured sections", (t) => {
+  const pi = new FakePi();
+  pi.ui.rows = 14;
+  const hostile = "before\rafter\t😀 e\u0301 漢\n"
+    + "\u001B]0;owned title\u0007"
+    + "\u001B[2Jclear\u001B[Hhome\u001B[Kerase"
+    + "\u001B[31mred\u001B[0m";
+  const view = dashboard(new FakeManager([job("job-1", "failed", {
+    output: hostile,
+    stderr: hostile,
+    errorMessage: hostile,
+    malformedEventCount: 1,
+    malformedEventSamples: [hostile],
+    progress: [{ type: "text", text: hostile, timestamp: 2_500 }],
+  })]), pi);
+  t.after(() => view.dispose());
+
+  view.handleInput?.("v");
+  let text = "";
+  for (;;) {
+    const lines = view.render(36);
+    text += `${plain(lines.join("\n"))}\n`;
+    for (const line of lines) assert.ok(visibleWidth(line) <= 36, `${visibleWidth(line)} > 36: ${line}`);
+    const viewport = /lines \d+–(\d+) of (\d+)/.exec(plain(lines.at(-1) ?? ""));
+    if (viewport?.[1] === viewport?.[2]) break;
+    view.handleInput?.("\x1b[6~");
+  }
+
+  for (const label of ["Output:", "Stderr:", "Error:", "Malformed:", "Progress:"]) assert.match(text, new RegExp(label));
+  assert.doesNotMatch(text, /\r|\t|\u001B\]|\u001B\[2J|\u001B\[H|\u001B\[K/);
+  assert.match(text, /😀|漢|é/);
+});
+
+test("full view resets its viewport after content shrink", (t) => {
+  const pi = new FakePi();
+  pi.ui.rows = 10;
+  const view = dashboard(new FakeManager([job("job-1", "completed", { output: Array.from({ length: 100 }, (_, index) => `line ${index}`).join("\n") })]), pi);
+  t.after(() => view.dispose());
+
+  view.handleInput?.("v");
+  view.handleInput?.("\x1b[F");
+  pi.ui.rows = 200;
+  view.setJobs([job("job-1", "completed", { output: "short" })]);
+  const lines = view.render(80);
+
+  assert.match(plain(lines.at(-1) ?? ""), /^lines 1–(\d+) of \1 /);
+  assert.match(plain(lines.join("\n")), /short/);
 });
 
 test("full title uses the projected job status ID", (t) => {

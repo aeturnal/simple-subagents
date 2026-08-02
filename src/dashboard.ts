@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, type Component, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { boundedPreview, projectJobStatus, type JobStatus } from "./job-status.js";
+import { boundedPreview, projectJobStatus, sanitizeTerminalText, type JobStatus } from "./job-status.js";
 import { JobManager } from "./job-manager.js";
 import type { Job, JobState } from "./types.js";
 
@@ -9,7 +9,7 @@ type DashboardTheme = { fg(color: "accent" | "dim" | "error" | "muted" | "succes
 type AttentionCounts = { queued: number; running: number; ready: number };
 type DashboardMode = "list" | "compact" | "full";
 type ReturnMode = Exclude<DashboardMode, "full">;
-type JobRecord = { kind: "job"; id: string; state: JobState; status: JobStatus };
+type JobRecord = { kind: "job"; id: string; state: JobState; status: JobStatus; job: Job };
 type ListRecord = { kind: "heading"; label: string } | JobRecord;
 
 const attentionCounts = (jobs: readonly Job[]): AttentionCounts => jobs.reduce<AttentionCounts>((counts, job) => {
@@ -164,7 +164,7 @@ export class SubagentsDashboard implements Component {
 
   private records(): ListRecord[] {
     const now = this.now();
-    const jobs = this.jobs.map((job) => ({ id: job.id, state: job.state, status: projectJobStatus(job, now) }));
+    const jobs = this.jobs.map((job) => ({ id: job.id, state: job.state, status: projectJobStatus(job, now), job }));
     const groups: Array<[string, JobRecord[]]> = [
       ["QUEUED", jobs.filter((job) => job.state === "queued").map((job) => ({ kind: "job", ...job }))],
       ["RUNNING", jobs.filter((job) => job.state === "running").map((job) => ({ kind: "job", ...job }))],
@@ -193,7 +193,7 @@ export class SubagentsDashboard implements Component {
     if (rows === 0) return [];
     if (rows === 1) return [title];
 
-    const content = this.fullMetadata(selected.status, width);
+    const content = this.fullDetail(selected.job, selected.status, width);
     const bodyRows = Math.max(0, rows - 2);
     const maxOffset = Math.max(0, content.length - bodyRows);
     this.fullOffset = Math.min(Math.max(0, this.fullOffset), maxOffset);
@@ -204,13 +204,25 @@ export class SubagentsDashboard implements Component {
     return [title, ...body.map(line), line(footer)];
   }
 
-  private fullMetadata(status: JobStatus, width: number): string[] {
+  private fullDetail(job: Job, status: JobStatus, width: number): string[] {
     const timestamp = (value: number | undefined, absent: string): string => value === undefined ? absent : new Date(value).toISOString();
     const duration = (value: number | undefined): string => value === undefined ? "Not recorded" : durationText(value);
-    const labeledField = (label: string, value: string): string[] => wrapTextWithAnsi(`${label}: ${value}`, Math.max(1, width));
+    const labeledField = (label: string, value: string): string[] => {
+      const prefix = `${label}: `;
+      const safe = sanitizeTerminalText(value, true);
+      const wrappedValue = safe.split("\n").flatMap((segment) => wrapTextWithAnsi(segment, Math.max(1, width - prefix.length)));
+      if (prefix.length >= width) return [...wrapTextWithAnsi(prefix, Math.max(1, width)), ...wrappedValue].map((line) => truncateToWidth(line, width));
+      const continuation = " ".repeat(prefix.length);
+      return wrappedValue.map((line, index) => truncateToWidth(`${index === 0 ? prefix : continuation}${line}`, width));
+    };
     const activity = status.recentActivity.length === 0
       ? labeledField("Recent activity", "No activity reported yet")
       : status.recentActivity.flatMap((item) => labeledField("Recent activity", `${new Date(item.timestamp).toISOString()} ${item.kind}: ${item.summary}`));
+    const malformedSamples = job.malformedEventSamples ?? [];
+    const malformed = `${job.malformedEventCount} malformed protocol event${job.malformedEventCount === 1 ? "" : "s"}.\n${malformedSamples.length ? malformedSamples.join("\n") : "No malformed protocol samples."}`;
+    const progress = job.progress.length
+      ? job.progress.map((item) => `${new Date(item.timestamp).toISOString()} ${item.type}: ${item.text}`).join("\n")
+      : "No activity reported yet.";
     return [
       ...labeledField("Status", `${status.id} ${stateText(status)}`),
       ...labeledField("Task", status.task),
@@ -227,7 +239,12 @@ export class SubagentsDashboard implements Component {
       ...activity,
       ...labeledField("Capture", status.captureNotices.length ? status.captureNotices.join(" · ") : "none"),
       ...labeledField("Error", status.hasError ? "reported" : "none"),
-    ].map((value) => truncateToWidth(value, width));
+      ...labeledField("Output", job.output || "No captured output."),
+      ...labeledField("Stderr", job.stderr || "No stderr captured."),
+      ...labeledField("Error", job.errorMessage || "No error reported."),
+      ...labeledField("Malformed", malformed),
+      ...labeledField("Progress", progress),
+    ];
   }
 
   private listBody(records: ListRecord[], selectedId: string | undefined, width: number, bodyRows: number): string[] {
