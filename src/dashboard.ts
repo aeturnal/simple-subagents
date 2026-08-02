@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, type Component, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { boundedPreview, projectJobStatus, sanitizeTerminalText, type JobStatus } from "./job-status.js";
@@ -20,6 +21,43 @@ const attentionCounts = (jobs: readonly Job[]): AttentionCounts => jobs.reduce<A
 }, { queued: 0, running: 0, ready: 0 });
 
 const isInbox = (state: JobState): boolean => state === "completed" || state === "failed" || state === "cancelled";
+
+const textFingerprint = (text: string): string => {
+  let hash = 2_166_136_261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return `${Buffer.byteLength(text, "utf8")}:${hash >>> 0}`;
+};
+
+const renderFingerprint = (jobs: readonly Job[]): string => JSON.stringify(jobs.map((job) => ({
+  id: job.id,
+  state: job.state,
+  task: job.request.task,
+  profileName: job.profile.name,
+  writeAccess: job.request.writeAccess,
+  createdAt: job.createdAt,
+  startedAt: job.startedAt,
+  finishedAt: job.finishedAt,
+  launchModel: job.launchModel,
+  launchThinkingLevel: job.launchThinkingLevel,
+  launchThinkingSource: job.launchThinkingSource,
+  reportedModel: job.model,
+  usage: job.usage,
+  nonTextProgress: job.progress.filter((item) => item.type !== "text"),
+  hasTextProgress: job.progress.some((item) => item.type === "text"),
+  textTruncations: job.progress.filter((item) => item.type === "text").map((item) => item.truncation),
+  output: textFingerprint(job.output),
+  stderr: textFingerprint(job.stderr),
+  error: job.errorMessage === undefined ? undefined : textFingerprint(job.errorMessage),
+  outputTruncation: job.outputTruncation,
+  stderrTruncation: job.stderrTruncation,
+  errorTruncation: job.errorTruncation,
+  truncation: job.truncation,
+  malformedEventCount: job.malformedEventCount,
+  malformedEventSamples: job.malformedEventSamples,
+})));
 
 const durationText = (durationMs: number): string => {
   const seconds = Math.floor(Math.max(0, durationMs) / 1_000);
@@ -63,19 +101,26 @@ export class SubagentsDashboard implements Component {
   private cachedWidth: number | undefined;
   private cachedRows: number | undefined;
   private cachedLines: string[] | undefined;
+  private renderFingerprint: string;
   private disposed = false;
   private readonly now: () => number;
 
   constructor(private readonly options: SubagentsDashboardOptions) {
     this.jobs = options.jobs;
+    this.renderFingerprint = renderFingerprint(options.jobs);
     this.now = options.now ?? (() => options.manager.currentTime());
   }
 
   setJobs(jobs: readonly Job[]): void {
+    if (this.disposed) return;
+    const nextFingerprint = renderFingerprint(jobs);
+    const fingerprintChanged = nextFingerprint !== this.renderFingerprint;
     const priorJobs = this.visibleJobs();
     const priorIndex = this.selected;
     const selectedId = priorJobs[priorIndex]?.id;
+    const priorMode = this.mode;
     this.jobs = jobs;
+    this.renderFingerprint = nextFingerprint;
     const visible = this.visibleJobs();
     const preservedIndex = selectedId === undefined ? -1 : visible.findIndex((job) => job.id === selectedId);
     this.selected = preservedIndex >= 0 ? preservedIndex : Math.min(priorIndex, Math.max(0, visible.length - 1));
@@ -83,10 +128,11 @@ export class SubagentsDashboard implements Component {
       this.mode = "list";
       this.fullOffset = 0;
     }
-    this.changed();
+    if (fingerprintChanged || selectedId !== visible[this.selected]?.id || priorMode !== this.mode) this.changed();
   }
 
   handleInput(data: string): void {
+    if (this.disposed) return;
     if (this.mode === "full") {
       this.handleFullInput(data);
       return;
@@ -142,12 +188,14 @@ export class SubagentsDashboard implements Component {
   }
 
   invalidate(): void {
+    if (this.disposed) return;
     this.cachedWidth = undefined;
     this.cachedRows = undefined;
     this.cachedLines = undefined;
   }
 
   dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
   }
 
@@ -308,6 +356,7 @@ export class SubagentsDashboard implements Component {
   }
 
   private changed(): void {
+    if (this.disposed) return;
     this.invalidate();
     this.options.requestRender();
   }

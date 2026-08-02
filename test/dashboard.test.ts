@@ -401,6 +401,91 @@ test("preserves selected identity across snapshots and selects the nearest visib
   assert.match(render(view), /Task: Task for job-1/);
 });
 
+test("constructing a running dashboard creates no refresh interval", (t) => {
+  const originalSetInterval = globalThis.setInterval;
+  let intervalCalls = 0;
+  globalThis.setInterval = ((..._args: Parameters<typeof setInterval>) => {
+    intervalCalls += 1;
+    return 0 as unknown as ReturnType<typeof setInterval>;
+  }) as typeof setInterval;
+  t.after(() => { globalThis.setInterval = originalSetInterval; });
+
+  const view = dashboard(new FakeManager([job("job-1", "running")]));
+  t.after(() => view.dispose());
+
+  assert.equal(intervalCalls, 0);
+});
+
+test("assistant deltas retain the latest snapshot without token-rate renders", (t) => {
+  const pi = new FakePi();
+  const view = dashboard(new FakeManager([job("job-1", "running", {
+    progress: [{ type: "text", text: "a", timestamp: 2_500 }],
+  })]), pi);
+  t.after(() => view.dispose());
+
+  const requests = pi.ui.renderRequests;
+  view.setJobs([job("job-1", "running", {
+    progress: [{ type: "text", text: "ab", timestamp: 2_600 }],
+  })]);
+  view.setJobs([job("job-1", "running", {
+    progress: [{ type: "text", text: "abc latest", timestamp: 2_700 }],
+  })]);
+
+  assert.equal(pi.ui.renderRequests, requests);
+  view.handleInput?.("\r");
+  assert.match(render(view), /abc latest/);
+});
+
+test("tool phases, usage, and completed state each request one render", (t) => {
+  const pi = new FakePi();
+  const view = dashboard(new FakeManager([job("job-1", "running", {
+    progress: [{ type: "text", text: "a", timestamp: 2_500 }],
+  })]), pi);
+  t.after(() => view.dispose());
+
+  let requests = pi.ui.renderRequests;
+  view.setJobs([job("job-1", "running", {
+    progress: [
+      { type: "text", text: "a", timestamp: 2_500 },
+      { type: "tool", text: "Read dashboard.ts", timestamp: 2_600 },
+    ],
+  })]);
+  assert.equal(pi.ui.renderRequests, requests + 1);
+
+  requests = pi.ui.renderRequests;
+  view.setJobs([job("job-1", "running", {
+    progress: [
+      { type: "text", text: "a", timestamp: 2_500 },
+      { type: "tool", text: "Read dashboard.ts", timestamp: 2_600 },
+    ],
+    usage: { input: 2, output: 2, cacheRead: 3, cacheWrite: 4, cost: 0.5, turns: 1 },
+  })]);
+  assert.equal(pi.ui.renderRequests, requests + 1);
+
+  requests = pi.ui.renderRequests;
+  view.setJobs([job("job-1", "completed", {
+    progress: [
+      { type: "text", text: "a", timestamp: 2_500 },
+      { type: "tool", text: "Read dashboard.ts", timestamp: 2_600 },
+    ],
+    usage: { input: 2, output: 2, cacheRead: 3, cacheWrite: 4, cost: 0.5, turns: 1 },
+  })]);
+  assert.equal(pi.ui.renderRequests, requests + 1);
+});
+
+test("dashboard ignores snapshots, input, and invalidation after disposal", () => {
+  const pi = new FakePi();
+  const view = dashboard(new FakeManager([job("job-1", "running")]), pi);
+  const initial = render(view);
+  view.dispose();
+  view.setJobs([job("job-1", "completed")]);
+  view.handleInput?.("\r");
+  view.invalidate();
+
+  assert.equal(pi.ui.renderRequests, 0);
+  assert.equal(render(view), initial);
+});
+
 test("dashboard reports a failed cancellation and closes on escape", async (t) => {
   const pi = new FakePi();
   const manager = new FakeManager([job("job-1", "running")]);
