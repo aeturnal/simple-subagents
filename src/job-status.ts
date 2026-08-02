@@ -96,7 +96,7 @@ const captureNotice = (label: string, truncation?: { originalBytes: number; kept
 
 export function projectJobStatus(job: Readonly<Job>, now: number): JobStatus {
   const isTerminal = job.state === "completed" || job.state === "failed" || job.state === "cancelled" || job.state === "collected" || job.state === "discarded";
-  const queueEnd = job.state === "queued" ? now : job.startedAt;
+  const queueEnd = job.state === "queued" ? now : job.startedAt ?? (isTerminal ? job.finishedAt : undefined);
   const runEnd = job.state === "running" ? now : isTerminal ? job.finishedAt : undefined;
   const latestPartial = [...job.progress].reverse().find((item) => item.type === "text");
   const recentActivity = job.progress.flatMap((item): StatusActivity[] => {

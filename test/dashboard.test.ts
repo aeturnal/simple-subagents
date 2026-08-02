@@ -446,6 +446,32 @@ test("assistant deltas retain the latest snapshot without token-rate renders", (
   assert.match(render(view), /abc latest/);
 });
 
+test("post-limit assistant deltas do not redraw when only original bytes grow", (t) => {
+  const pi = new FakePi();
+  const cappedText = "x".repeat(50 * 1024);
+  const view = dashboard(new FakeManager([job("job-1", "running", {
+    progress: [{ type: "text", text: cappedText, timestamp: 2_500, truncation: { originalBytes: 50 * 1024 + 1, keptBytes: 50 * 1024 } }],
+  })]), pi);
+  t.after(() => view.dispose());
+
+  const requests = pi.ui.renderRequests;
+  view.setJobs([job("job-1", "running", {
+    progress: [{ type: "text", text: cappedText, timestamp: 2_600, truncation: { originalBytes: 50 * 1024 + 2, keptBytes: 50 * 1024 } }],
+  })]);
+  view.setJobs([job("job-1", "running", {
+    progress: [{ type: "text", text: cappedText, timestamp: 2_700, truncation: { originalBytes: 50 * 1024 + 3, keptBytes: 50 * 1024 } }],
+  })]);
+
+  assert.equal(pi.ui.renderRequests, requests);
+});
+
+test("terminal queued cancellation shows its queue duration in the dashboard", (t) => {
+  const view = dashboard(new FakeManager([job("job-1", "cancelled", { startedAt: undefined })]));
+  t.after(() => view.dispose());
+
+  assert.match(render(view), /> job-1 cancelled 2s/);
+});
+
 test("tool phases, usage, and completed state each request one render", (t) => {
   const pi = new FakePi();
   const view = dashboard(new FakeManager([job("job-1", "running", {

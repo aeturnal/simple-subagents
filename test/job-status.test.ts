@@ -50,6 +50,13 @@ test("projects queue, running, and final durations with one injected clock", () 
   assert.equal(completed.runDurationMs, 5_000);
 });
 
+test("projects a terminal queued job duration from creation to finish", () => {
+  const cancelled = projectJobStatus(job("cancelled", { startedAt: undefined, finishedAt: 7_000 }), 10_000);
+
+  assert.equal(cancelled.queueDurationMs, 6_000);
+  assert.equal(cancelled.runDurationMs, undefined);
+});
+
 test("selects three chronological activity previews and caps grouped status", () => {
   const status = projectJobStatus(job("running", { progress: [
     { type: "tool", text: "Started read", timestamp: 2_100 },

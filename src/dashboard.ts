@@ -47,7 +47,7 @@ const renderFingerprint = (jobs: readonly Job[]): string => JSON.stringify(jobs.
   usage: job.usage,
   nonTextProgress: job.progress.filter((item) => item.type !== "text"),
   hasTextProgress: job.progress.some((item) => item.type === "text"),
-  textTruncations: job.progress.filter((item) => item.type === "text").map((item) => item.truncation),
+  textTruncations: job.progress.filter((item) => item.type === "text").map((item) => item.truncation === undefined ? undefined : { keptBytes: item.truncation.keptBytes }),
   output: textFingerprint(job.output),
   stderr: textFingerprint(job.stderr),
   error: job.errorMessage === undefined ? undefined : textFingerprint(job.errorMessage),
@@ -65,7 +65,7 @@ const durationText = (durationMs: number): string => {
 };
 
 const stateText = (status: JobStatus): string => {
-  const duration = status.state === "queued" ? status.queueDurationMs : status.runDurationMs;
+  const duration = status.state === "queued" ? status.queueDurationMs : status.runDurationMs ?? status.queueDurationMs;
   return `${status.state}${duration === undefined ? "" : ` ${durationText(duration)}`}`;
 };
 
