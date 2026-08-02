@@ -1,19 +1,14 @@
-import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import {
-  Key,
-  Markdown,
-  matchesKey,
-  truncateToWidth,
-  type Component,
-  wrapTextWithAnsi,
-} from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Key, matchesKey, truncateToWidth, type Component, visibleWidth } from "@earendil-works/pi-tui";
+import { boundedPreview, projectJobStatus, type JobStatus } from "./job-status.js";
 import { JobManager } from "./job-manager.js";
-import { formatCollectedResult } from "./output.js";
-import type { Job } from "./types.js";
+import type { Job, JobState } from "./types.js";
 
 type DashboardTheme = { fg(color: "accent" | "dim" | "error" | "muted" | "success" | "warning", text: string): string; bold(text: string): string };
 
 type AttentionCounts = { queued: number; running: number; ready: number };
+type JobRecord = { kind: "job"; id: string; state: JobState; status: JobStatus };
+type ListRecord = { kind: "heading"; label: string } | JobRecord;
 
 const attentionCounts = (jobs: readonly Job[]): AttentionCounts => jobs.reduce<AttentionCounts>((counts, job) => {
   if (job.state === "queued") counts.queued += 1;
@@ -21,6 +16,18 @@ const attentionCounts = (jobs: readonly Job[]): AttentionCounts => jobs.reduce<A
   else if (["completed", "failed", "cancelled"].includes(job.state)) counts.ready += 1;
   return counts;
 }, { queued: 0, running: 0, ready: 0 });
+
+const isInbox = (state: JobState): boolean => state === "completed" || state === "failed" || state === "cancelled";
+
+const durationText = (durationMs: number): string => {
+  const seconds = Math.floor(Math.max(0, durationMs) / 1_000);
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+};
+
+const stateText = (status: JobStatus): string => {
+  const duration = status.state === "queued" ? status.queueDurationMs : status.runDurationMs;
+  return `${status.state}${duration === undefined ? "" : ` ${durationText(duration)}`}`;
+};
 
 export function formatWidgetLines(jobs: readonly Job[], theme: DashboardTheme): string[] {
   const counts = attentionCounts(jobs);
@@ -36,34 +43,27 @@ export function formatWidgetLines(jobs: readonly Job[], theme: DashboardTheme): 
 export interface SubagentsDashboardOptions {
   jobs: readonly Job[];
   manager: JobManager;
-  pi: ExtensionAPI;
   theme: DashboardTheme;
+  terminalRows(): number;
   requestRender(): void;
   notify(message: string): void;
   close(): void;
   now?: () => number;
-  setInterval?: typeof globalThis.setInterval;
-  clearInterval?: typeof globalThis.clearInterval;
 }
 
 export class SubagentsDashboard implements Component {
   private jobs: readonly Job[];
   private selected = 0;
-  private detailed = false;
+  private listOffset = 0;
   private cachedWidth: number | undefined;
+  private cachedRows: number | undefined;
   private cachedLines: string[] | undefined;
-  private refreshTimer: ReturnType<typeof globalThis.setInterval> | undefined;
   private disposed = false;
   private readonly now: () => number;
-  private readonly setIntervalFn: typeof globalThis.setInterval;
-  private readonly clearIntervalFn: typeof globalThis.clearInterval;
 
   constructor(private readonly options: SubagentsDashboardOptions) {
     this.jobs = options.jobs;
-    this.now = options.now ?? Date.now;
-    this.setIntervalFn = options.setInterval ?? globalThis.setInterval;
-    this.clearIntervalFn = options.clearInterval ?? globalThis.clearInterval;
-    this.updateRefreshTimer();
+    this.now = options.now ?? (() => options.manager.currentTime());
   }
 
   setJobs(jobs: readonly Job[]): void {
@@ -74,7 +74,6 @@ export class SubagentsDashboard implements Component {
     const visible = this.visibleJobs();
     const preservedIndex = selectedId === undefined ? -1 : visible.findIndex((job) => job.id === selectedId);
     this.selected = preservedIndex >= 0 ? preservedIndex : Math.min(priorIndex, Math.max(0, visible.length - 1));
-    this.updateRefreshTimer();
     this.changed();
   }
 
@@ -82,154 +81,96 @@ export class SubagentsDashboard implements Component {
     const jobs = this.visibleJobs();
     if (matchesKey(data, Key.up) && this.selected > 0) this.selected -= 1;
     else if (matchesKey(data, Key.down) && this.selected < jobs.length - 1) this.selected += 1;
-    else if (matchesKey(data, Key.enter)) this.detailed = !this.detailed;
     else if (matchesKey(data, Key.escape)) {
       this.dispose();
       this.options.close();
       return;
     } else {
       const selected = jobs[this.selected];
-      if (selected && matchesKey(data, "c") && (selected.state === "queued" || selected.state === "running")) {
-        try {
-          void this.options.manager.cancel(selected.id).catch(() => this.actionFailed("cancel"));
-        } catch {
-          this.actionFailed("cancel");
-        }
-        return;
-      } else if (selected && matchesKey(data, "x") && this.isInbox(selected)) {
-        try {
-          const current = this.options.manager.list().find((job) => job.id === selected.id);
-          if (!current || !this.isInbox(current)) throw new Error("Job is no longer collectable");
-          const formatted = formatCollectedResult(selected);
-          this.options.pi.sendMessage({
-            customType: "simple-subagents-result",
-            content: formatted,
-            display: true,
-            details: { jobId: selected.id },
-          }, { deliverAs: "nextTurn" });
-          this.options.manager.collect(selected.id);
-        } catch {
-          this.actionFailed("collect");
-        }
-        return;
-      } else if (selected && matchesKey(data, "d") && this.isInbox(selected)) {
-        try {
-          this.options.manager.discard(selected.id);
-        } catch {
-          this.actionFailed("discard");
-        }
-        return;
-      } else return;
+      if (!selected || !matchesKey(data, "c") || (selected.state !== "queued" && selected.state !== "running")) return;
+      try {
+        void this.options.manager.cancel(selected.id).catch(() => this.actionFailed());
+      } catch {
+        this.actionFailed();
+      }
+      return;
     }
     this.changed();
   }
 
   render(width: number): string[] {
-    if (this.cachedWidth === width && this.cachedLines) return this.cachedLines;
+    const rows = Math.max(0, Math.floor(this.options.terminalRows()));
+    if (this.cachedWidth === width && this.cachedRows === rows && this.cachedLines) return this.cachedLines;
+
     const line = (value: string): string => truncateToWidth(value, width);
-    const jobs = this.visibleJobs();
+    if (rows === 0) return this.cache(width, rows, []);
+    const title = line(this.options.theme.bold("Subagents"));
+    if (rows === 1) return this.cache(width, rows, [title]);
+
+    const records = this.records();
+    const jobs = records.filter((record): record is JobRecord => record.kind === "job");
     this.selected = Math.min(this.selected, Math.max(0, jobs.length - 1));
-    const lines: string[] = [line(this.options.theme.bold("Subagents"))];
-    const groups: Array<[string, Job[]]> = [
-      ["QUEUED", jobs.filter((job) => job.state === "queued")],
-      ["RUNNING", jobs.filter((job) => job.state === "running")],
-      ["INBOX", jobs.filter((job) => this.isInbox(job))],
-    ];
-    for (const [heading, group] of groups) {
-      if (group.length === 0) continue;
-      lines.push(line(this.options.theme.fg("dim", heading)));
-      for (const item of group) lines.push(line(this.row(item, jobs[this.selected]?.id === item.id)));
-    }
-    if (jobs.length === 0) lines.push(line(this.options.theme.fg("dim", "No subagent jobs.")));
-    if (this.detailed && jobs[this.selected]) lines.push(...this.detail(jobs[this.selected]!, width));
-    lines.push(line("↑↓ navigate · enter inspect · c cancel · x collect · d discard · esc close"));
-    this.cachedWidth = width;
-    this.cachedLines = lines;
-    return lines;
+    const selectedId = jobs[this.selected]?.id;
+    const selectedRecord = records.findIndex((record) => record.kind === "job" && record.id === selectedId);
+    const bodyRows = Math.max(0, rows - 2);
+    const maxOffset = Math.max(0, records.length - bodyRows);
+    if (selectedRecord >= 0 && selectedRecord < this.listOffset) this.listOffset = selectedRecord;
+    else if (selectedRecord >= this.listOffset + bodyRows) this.listOffset = selectedRecord - bodyRows + 1;
+    this.listOffset = Math.min(Math.max(0, this.listOffset), maxOffset);
+
+    const body = records.slice(this.listOffset, this.listOffset + bodyRows).map((record) => record.kind === "heading"
+      ? line(this.options.theme.fg("dim", record.label))
+      : this.row(record.status, record.id === selectedId, width));
+    if (body.length === 0 && records.length === 0 && bodyRows > 0) body.push(line(this.options.theme.fg("dim", "No subagent jobs.")));
+    return this.cache(width, rows, [title, ...body, line("↑↓ select · c cancel · esc close")]);
   }
 
   invalidate(): void {
     this.cachedWidth = undefined;
+    this.cachedRows = undefined;
     this.cachedLines = undefined;
   }
 
   dispose(): void {
-    if (this.disposed) return;
     this.disposed = true;
-    if (this.refreshTimer !== undefined) {
-      this.clearIntervalFn(this.refreshTimer);
-      this.refreshTimer = undefined;
-    }
   }
 
-  private visibleJobs(): Job[] {
-    return [
-      ...this.jobs.filter((job) => job.state === "queued"),
-      ...this.jobs.filter((job) => job.state === "running"),
-      ...this.jobs.filter((job) => this.isInbox(job)),
+  private cache(width: number, rows: number, lines: string[]): string[] {
+    this.cachedWidth = width;
+    this.cachedRows = rows;
+    this.cachedLines = lines;
+    return lines;
+  }
+
+  private visibleJobs(): JobRecord[] {
+    return this.records().filter((record): record is JobRecord => record.kind === "job");
+  }
+
+  private records(): ListRecord[] {
+    const now = this.now();
+    const jobs = this.jobs.map((job) => ({ id: job.id, state: job.state, status: projectJobStatus(job, now) }));
+    const groups: Array<[string, JobRecord[]]> = [
+      ["QUEUED", jobs.filter((job) => job.state === "queued").map((job) => ({ kind: "job", ...job }))],
+      ["RUNNING", jobs.filter((job) => job.state === "running").map((job) => ({ kind: "job", ...job }))],
+      ["INBOX", jobs.filter((job) => isInbox(job.state)).map((job) => ({ kind: "job", ...job }))],
     ];
+    return groups.flatMap(([label, records]) => records.length === 0 ? [] : [{ kind: "heading", label }, ...records]);
   }
 
-  private isInbox(job: Job): boolean {
-    return job.state === "completed" || job.state === "failed" || job.state === "cancelled";
-  }
-
-  private row(job: Job, selected: boolean): string {
+  private row(status: JobStatus, selected: boolean, width: number): string {
     const marker = selected ? this.options.theme.fg("accent", "> ") : "  ";
-    const writable = job.request.writeAccess ? "W " : "";
-    const elapsed = job.state === "running" && job.startedAt ? ` ${Math.max(0, Math.floor((this.now() - job.startedAt) / 1000))}s` : "";
-    return `${marker}${job.id} ${writable}${job.state}${elapsed} · ${job.request.task}`;
+    const writeMarker = status.access === "write" ? "W " : "";
+    const base = `${marker}${status.id} ${writeMarker}${stateText(status)} · ${status.task}`;
+    const activity = status.recentActivity.at(-1)?.summary;
+    const withActivity = activity && visibleWidth(`${base} · ${boundedPreview(activity)}`) <= width
+      ? `${base} · ${boundedPreview(activity)}`
+      : base;
+    return truncateToWidth(withActivity, width);
   }
 
-  private detail(job: Job, width: number): string[] {
-    const lines = [this.options.theme.bold(`DETAIL ${job.id}`)];
-    const wrap = (label: string, value: string): void => {
-      const available = Math.max(1, width - label.length);
-      const wrapped = wrapTextWithAnsi(value, available);
-      lines.push(`${label}${wrapped.shift() ?? ""}`);
-      lines.push(...wrapped.map((part) => " ".repeat(label.length) + part));
-    };
-    wrap("Task: ", job.request.task);
-    wrap("Profile: ", job.profile.name);
-    wrap("Access: ", job.request.writeAccess ? "write" : "read-only");
-    const thinkingSource = job.launchThinkingSource === "job" ? "job override"
-      : job.launchThinkingSource === "parent" ? "parent session"
-        : job.launchThinkingSource === "legacy" ? "legacy profile/parent behavior"
-          : "model or Pi default";
-    wrap("Launch model: ", job.launchModel ?? "Pi default");
-    wrap("Launch thinking: ", job.launchThinkingLevel ? `${job.launchThinkingLevel} (${thinkingSource})` : thinkingSource);
-    wrap("Reported model: ", job.model ?? "not reported");
-    wrap("Created: ", new Date(job.createdAt).toISOString());
-    wrap("Started: ", job.startedAt ? new Date(job.startedAt).toISOString() : "not started");
-    wrap("Finished: ", job.finishedAt ? new Date(job.finishedAt).toISOString() : "not finished");
-    wrap("Progress: ", job.progress.slice(-3).map((item) => item.text).join(" · ") || "none");
-    const latestPartial = [...job.progress].reverse().find((item) => item.type === "text");
-    wrap("Output: ", job.output || "none");
-    const outputTruncation = job.outputTruncation ?? job.truncation;
-    wrap("Output capture: ", outputTruncation ? `${outputTruncation.keptBytes} of ${outputTruncation.originalBytes} bytes retained` : "not truncated");
-    wrap("Stderr: ", job.stderr || "none");
-    wrap("Stderr capture: ", job.stderrTruncation ? `${job.stderrTruncation.keptBytes} of ${job.stderrTruncation.originalBytes} bytes retained` : "not truncated");
-    wrap("Error: ", job.errorMessage || "none");
-    wrap("Error capture: ", job.errorTruncation ? `${job.errorTruncation.keptBytes} of ${job.errorTruncation.originalBytes} bytes retained` : "not truncated");
-    wrap("Partial output capture: ", latestPartial?.truncation ? `${latestPartial.truncation.keptBytes} of ${latestPartial.truncation.originalBytes} bytes retained` : "not truncated");
-    wrap("Malformed: ", `${job.malformedEventCount} (${job.malformedEventSamples?.join(", ") || "none"})`);
-    wrap("Usage: ", `input ${job.usage.input}, output ${job.usage.output}, cache ${job.usage.cacheRead + job.usage.cacheWrite}, ${job.usage.turns} turns`);
-    wrap("Truncated: ", job.truncation ? `${job.truncation.keptBytes} of ${job.truncation.originalBytes} bytes retained` : "not truncated");
-    return lines.map((item) => truncateToWidth(item, width));
-  }
-
-  private updateRefreshTimer(): void {
-    const hasRunningJobs = this.jobs.some((job) => job.state === "running");
-    if (hasRunningJobs && this.refreshTimer === undefined) this.refreshTimer = this.setIntervalFn(() => this.changed(), 1_000);
-    else if (!hasRunningJobs && this.refreshTimer !== undefined) {
-      this.clearIntervalFn(this.refreshTimer);
-      this.refreshTimer = undefined;
-    }
-  }
-
-  private actionFailed(action: "cancel" | "collect" | "discard"): void {
+  private actionFailed(): void {
     if (this.disposed) return;
-    this.options.notify(`Could not ${action} subagent job.`);
+    this.options.notify("Could not cancel subagent job.");
     this.setJobs(this.options.manager.list());
   }
 
@@ -249,11 +190,6 @@ export function registerSubagentsUi(pi: ExtensionAPI, manager: JobManager): () =
     if (widgetContext?.mode === "tui") widgetContext.ui.setWidget("simple-subagents", undefined);
     widgetContext = undefined;
   };
-
-  pi.registerMessageRenderer("simple-subagents-result", (message, { outputPad }) => {
-    const content = typeof message.content === "string" ? message.content : "Subagent result.";
-    return new Markdown(content, outputPad, 0, getMarkdownTheme());
-  });
 
   pi.registerCommand("subagents", {
     description: "Open the subagent inbox dashboard",
@@ -278,8 +214,8 @@ export function registerSubagentsUi(pi: ExtensionAPI, manager: JobManager): () =
           component = new SubagentsDashboard({
             jobs: manager.list(),
             manager,
-            pi,
             theme,
+            terminalRows: () => tui.terminal.rows,
             requestRender: () => tui.requestRender(),
             notify: (message) => ctx.ui.notify(message, "error"),
             close: () => close(done),
