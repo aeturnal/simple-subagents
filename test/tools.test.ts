@@ -13,6 +13,7 @@ import {
   startJobs,
   statusJobs,
   waitJobs,
+  type ToolDetails,
   type ToolServices,
   type WriteConfirmation,
 } from "../src/tools.ts";
@@ -233,18 +234,59 @@ test("startJobs sanitizes line breaks in unknown profile diagnostics", async () 
   assert.equal(runner.started.length, 0);
 });
 
-test("statusJobs lists all jobs and can inspect one job", async () => {
+test("statusJobs returns rich bounded status for one job", async () => {
   const { services, runner } = createServices();
-  await startJobs({ tasks: [{ task: "one" }, { task: "two" }] }, services, {} as never);
-  runner.started[0]?.resolve(completed());
+  await startJobs({ tasks: [{ task: "one" }] }, services, {} as never);
+  runner.started[0]?.resolve(completed("secret final answer"));
   await runner.flush();
 
-  const listed = await statusJobs({}, services);
-  const inspected = await statusJobs({ id: "job-1" }, services);
+  const result = await statusJobs({ id: "job-1" }, services);
+  const content = text(result);
 
-  assert.equal(listed.details.jobs.length, 2);
-  assert.equal(inspected.details.jobs.length, 1);
-  assert.equal(inspected.details.jobs[0]?.state, "completed");
+  assert.match(content, /job-1.*completed/);
+  assert.match(content, /Task: one/);
+  assert.match(content, /Agent: generic.*Access: read-only/);
+  assert.match(content, /Launch model: parent\/model:high/);
+  assert.match(content, /Launch thinking: high \(legacy profile\/parent behavior\)/);
+  assert.match(content, /Usage: input 1, output 2, cache read 3, cache write 4, cost 0.5, turns 1/);
+  assert.match(content, /Result ready.*collect job-1/);
+  assert.doesNotMatch(content, /secret final answer|systemPrompt|stderr|malformed/);
+  const details = result.details as ToolDetails & { statuses?: { length: number } };
+  assert.equal(details.statuses?.length, 1);
+  assert.equal(details.jobs.length, 1);
+  assert.ok(Buffer.byteLength(content, "utf8") < 50 * 1024);
+});
+
+test("statusJobs groups a bounded list without captured output", async () => {
+  const jobs: Job[] = Array.from({ length: 25 }, (_, index) => ({
+    id: `job-${index + 1}`,
+    request: { task: `task ${index + 1}`, agent: "generic", writeAccess: false },
+    profile: { name: "generic", description: "Reviews code", systemPrompt: "private prompt", source: "builtin" },
+    state: index % 3 === 0 ? "running" : index % 3 === 1 ? "completed" : "collected",
+    createdAt: 1_000,
+    startedAt: 2_000,
+    finishedAt: index % 3 === 0 ? undefined : 3_000,
+    progress: [],
+    output: "secret list output",
+    stderr: "",
+    usage: usage(),
+    malformedEventCount: 0,
+    launchThinkingSource: "parent",
+  }));
+  let clockReads = 0;
+  const manager = {
+    currentTime: () => { clockReads += 1; return 4_000; },
+    list: () => jobs,
+  } as unknown as JobManager;
+
+  const result = await statusJobs({}, { manager } as ToolServices);
+
+  assert.equal(clockReads, 1);
+  const details = result.details as ToolDetails & { statuses?: { length: number }; omittedStatuses?: number };
+  assert.equal(details.statuses?.length, 20);
+  assert.equal(details.omittedStatuses, 5);
+  assert.match(text(result), /5 additional jobs omitted/);
+  assert.doesNotMatch(text(result), /secret list output/);
 });
 
 test("statusJobs returns an ordinary diagnostic for an unknown ID", async () => {
@@ -499,8 +541,12 @@ test("tool renderers preserve task detail when expanded and keep compact control
   const compactStatus = render("subagent_status", successfulStatus, false);
   assert.match(compactStatus, /Jobs: 1/);
   assert.match(compactStatus, /✓ job-1 completed/);
-  assert.doesNotMatch(compactStatus, /  one/);
-  assert.match(render("subagent_status", successfulStatus, true), /  one/);
+  assert.doesNotMatch(compactStatus, /Task: one|collected secret/);
+  const expandedStatus = render("subagent_status", successfulStatus, true);
+  assert.match(expandedStatus, /Task: one/);
+  assert.match(expandedStatus, /Recent activity:/);
+  assert.match(expandedStatus, /Result ready/);
+  assert.doesNotMatch(expandedStatus, /collected secret/);
 
   const collected = await controlJobs({ action: "collect", ids: ["job-1"] }, services);
   const compactCollect = render("subagent_control", collected, false);

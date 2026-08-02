@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { JobManager, type WaitJobStatus, type WaitResult, type WaitUntil } from "./job-manager.js";
+import { formatJobStatusList, formatSingleJobStatus, projectJobStatus, selectStatusList, type JobStatus } from "./job-status.js";
 import { capCollectedPayload, formatCollectedResult } from "./output.js";
 import { buildPublicAgentDiscovery, formatUnknownProfileDiagnostic, type PublicAgentProfile } from "./profile-discovery.js";
 import { THINKING_LEVELS, type AgentProfile, type Job, type JobRequest } from "./types.js";
@@ -57,6 +58,8 @@ export interface ToolDetails {
   operation?: "agents" | "start" | "status" | "wait" | "cancel" | "collect" | "discard";
   profiles?: PublicAgentProfile[];
   omittedProfiles?: number;
+  statuses?: JobStatus[];
+  omittedStatuses?: number;
 }
 
 export type WaitToolDetails = WaitResult;
@@ -137,14 +140,29 @@ export async function startJobs(input: StartInput, services: ToolServices, ctx: 
 }
 
 export async function statusJobs(input: StatusInput, services: ToolServices): Promise<ToolResponse & { details: ToolDetails }> {
+  const now = services.manager.currentTime();
   if (input.id) {
     const job = services.manager.get(input.id);
     if (!job) return response(`Unknown job: ${input.id}`, [], [`Unknown job: ${input.id}`], "status");
-    return response(`${job.id}: ${job.state}`, [job], [], "status");
+    const status = projectJobStatus(job, now);
+    return {
+      content: [{ type: "text", text: formatSingleJobStatus(status, now) }],
+      details: { jobs: [job], statuses: [status], diagnostics: [], operation: "status" },
+    };
   }
 
   const jobs = services.manager.list();
-  return response(jobs.length === 0 ? "No background subagent jobs." : `Jobs: ${summary(jobs)}`, jobs, [], "status");
+  const selected = selectStatusList(jobs, now);
+  return {
+    content: [{ type: "text", text: formatJobStatusList(selected, now) }],
+    details: {
+      jobs: [...jobs],
+      statuses: selected.statuses,
+      omittedStatuses: selected.omitted,
+      diagnostics: [],
+      operation: "status",
+    },
+  };
 }
 
 const waitSummary = (jobs: readonly WaitJobStatus[]): string =>
@@ -293,8 +311,16 @@ const launchDetail = (job: Job): string => [
 
 const renderToolResult = (result: ToolResponse, expanded: boolean, theme: { fg(color: string, text: string): string }): string => {
   if ("outcome" in result.details) return renderWaitResult(result, expanded, theme);
-  const { jobs, diagnostics, operation } = result.details;
+  const { jobs, diagnostics, operation, statuses, omittedStatuses } = result.details;
   const content = result.content.find((part) => part.type === "text")?.text ?? "";
+  if (operation === "status" && statuses) {
+    const compact = [
+      `Jobs: ${statuses.length} (+${omittedStatuses ?? 0} omitted)`,
+      ...statuses.map((status) => `${iconForState(status.state)} ${status.id} ${status.state}`),
+      ...diagnostics,
+    ].join("\n");
+    return theme.fg("muted", expanded ? [compact, content].filter(Boolean).join("\n\n") : compact);
+  }
   const heading = jobs.length === 0 ? "" : operation === "start" ? `Started ${jobs.length} job${jobs.length === 1 ? "" : "s"}`
     : operation === "collect" ? `Collected ${jobs.length} result${jobs.length === 1 ? "" : "s"}`
       : operation === "discard" ? `Discarded ${jobs.length} job${jobs.length === 1 ? "" : "s"}`
@@ -304,7 +330,7 @@ const renderToolResult = (result: ToolResponse, expanded: boolean, theme: { fg(c
   if (!expanded) return theme.fg("muted", compact);
 
   const detail = operation === "collect" || diagnostics.length > 0 ? content
-    : operation === "start" || operation === "status" ? jobs.map(launchDetail).join("\n")
+    : operation === "start" ? jobs.map(launchDetail).join("\n")
       : "";
   return theme.fg("muted", [compact, detail].filter(Boolean).join("\n\n"));
 };
