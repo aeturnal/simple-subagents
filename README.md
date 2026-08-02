@@ -25,7 +25,21 @@ Or load the extension for a single run without installing it:
 pi -e ./src/index.ts
 ```
 
-Ask Pi naturally: “start three parallel subagents to review the tests, dependencies, and docs”; “show subagent status”; “wait for job-1 and job-3”; “cancel job-2”; or “collect job-1 and job-3.” `/subagents` opens the interactive inbox: arrows select, Enter inspects, `c` cancels, `x` collects, `d` discards, and Escape closes.
+Ask Pi naturally: “start three parallel subagents to review the tests, dependencies, and docs”; “show subagent status”; “wait for job-1 and job-3”; “cancel job-2”; or “collect job-1 and job-3.” `/subagents` opens a read-only inspection dashboard: arrows select jobs, Enter toggles compact details, `v` opens or closes the scrollable full view, Page Up/Page Down and Home/End scroll full details, `c` cancels queued or running work, and Escape returns from full view or closes the dashboard.
+
+`subagent_status` reports bounded task, state, timing, profile, access, launch/reported model, usage, and up to three recent activity previews. It never returns the complete captured answer, stderr, error body, malformed protocol samples, or profile prompt. A completed status points the parent to `subagent_control` to collect the result.
+
+```text
+job-2 — running · running for 2m 14s
+Task: Review authentication changes
+Agent: reviewer · Access: read-only
+Model: openai-codex/gpt-5.6-terra · Thinking: medium (job override)
+Usage: 28000 input · 3000 output · 6 turns · $0.08
+Recent activity:
+  4s ago   Completed read
+  2s ago   Started lsp_diagnostics
+  now      Checking diagnostics in src/auth.ts
+```
 
 ## Agents and access
 
@@ -77,6 +91,6 @@ Jobs are read-only by default. The parent model can explicitly request write acc
 
 `subagent_wait` is an event-driven pause for jobs expected to finish when no useful parent work can proceed. The parent cannot answer concurrently while the tool is waiting, so each call defaults to 60 seconds and lasts at most 5 minutes. The wait returns immediately when its requested jobs settle; the configured timeout is only an upper bound. A timeout returns current states without cancelling work; do not immediately wait again—continue other work or return control. Aborting the parent turn does not cancel subagents. When the parent is not waiting, use `subagent_status` or the dashboard to check progress.
 
-At most four jobs run at once, and a start or control batch accepts at most eight jobs. Collected output is capped at 50 KB. Cancel queued or running work from the tools or dashboard; session shutdown also cancels queued and active jobs before the extension closes.
+At most four jobs run at once, and a start or control batch accepts at most eight jobs. Collected output is capped at 50 KB. Cancel queued or running work from the tools or dashboard. Collection and discard are parent-agent operations through `subagent_control`; the dashboard never injects a result into the conversation. Session shutdown cancels queued and active jobs before the extension closes.
 
 The inbox is memory-only. Uncollected results are lost on `/reload`, session replacement, or Pi exit, so collect important output before changing sessions.
