@@ -365,6 +365,8 @@ export class SubagentsDashboard implements Component {
 export function registerSubagentsUi(pi: ExtensionAPI, manager: JobManager): () => void {
   let widgetContext: ExtensionContext | undefined;
   let removeWidgetSubscription: (() => void) | undefined;
+  let activeDashboard: { close(): void } | undefined;
+  let cleanedUp = false;
 
   const clearWidget = (): void => {
     removeWidgetSubscription?.();
@@ -376,53 +378,60 @@ export function registerSubagentsUi(pi: ExtensionAPI, manager: JobManager): () =
   pi.registerCommand("subagents", {
     description: "Open the subagent inbox dashboard",
     handler: async (_args, ctx) => {
+      if (cleanedUp) return;
       if (ctx.mode !== "tui") {
         ctx.ui.notify("The subagents dashboard requires interactive mode.", "warning");
         return;
       }
+      activeDashboard?.close();
       let unsubscribe: (() => void) | undefined;
       let component: SubagentsDashboard | undefined;
+      let doneCustom: (() => void) | undefined;
       let closed = false;
-      const close = (done: () => void): void => {
-        if (closed) return;
-        closed = true;
-        component?.dispose();
-        unsubscribe?.();
-        unsubscribe = undefined;
-        done();
+      const opening = {
+        close: (): void => {
+          if (closed) return;
+          closed = true;
+          component?.dispose();
+          unsubscribe?.();
+          unsubscribe = undefined;
+          if (activeDashboard === opening) activeDashboard = undefined;
+          doneCustom?.();
+        },
       };
+      activeDashboard = opening;
       try {
         await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+          doneCustom = done;
           component = new SubagentsDashboard({
             jobs: manager.list(),
             manager,
             theme,
             terminalRows: () => tui.terminal.rows,
-            requestRender: () => tui.requestRender(),
-            notify: (message) => ctx.ui.notify(message, "error"),
-            close: () => close(done),
+            requestRender: () => { if (!closed) tui.requestRender(); },
+            notify: (message) => { if (!closed) ctx.ui.notify(message, "error"); },
+            close: opening.close,
           });
           unsubscribe = manager.subscribe((jobs) => {
-            component?.setJobs(jobs);
+            if (!closed) component?.setJobs(jobs);
           });
           return component;
         });
       } finally {
-        if (!closed) {
-          closed = true;
-          component?.dispose();
-          unsubscribe?.();
-          unsubscribe = undefined;
-        }
+        opening.close();
       }
     },
   });
 
   pi.on("session_start", (_event, ctx) => {
+    activeDashboard?.close();
+    activeDashboard = undefined;
     clearWidget();
-    if (ctx.mode !== "tui") return;
+    if (cleanedUp || ctx.mode !== "tui") return;
     widgetContext = ctx;
-    removeWidgetSubscription = manager.subscribe((jobs) => {
+    let widgetClosed = false;
+    const unsubscribe = manager.subscribe((jobs) => {
+      if (widgetClosed) return;
       const counts = attentionCounts(jobs);
       if (counts.queued + counts.running + counts.ready === 0) {
         ctx.ui.setWidget("simple-subagents", undefined);
@@ -433,7 +442,18 @@ export function registerSubagentsUi(pi: ExtensionAPI, manager: JobManager): () =
         invalidate: () => {},
       }));
     });
+    removeWidgetSubscription = () => {
+      if (widgetClosed) return;
+      widgetClosed = true;
+      unsubscribe();
+    };
   });
 
-  return clearWidget;
+  return () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    activeDashboard?.close();
+    activeDashboard = undefined;
+    clearWidget();
+  };
 }

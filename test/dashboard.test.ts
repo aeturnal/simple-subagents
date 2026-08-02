@@ -31,7 +31,9 @@ const job = (id: string, state: JobState, overrides: Partial<Job> = {}): Job => 
 class FakeManager {
   jobs: Job[];
   readonly listeners = new Set<(jobs: readonly Job[]) => void>();
+  readonly capturedListeners: Array<(jobs: readonly Job[]) => void> = [];
   readonly calls: string[] = [];
+  lifecycleEvents: string[] | undefined;
   listCalls = 0;
   unsubscribeCalls = 0;
   shutdownCalls = 0;
@@ -41,9 +43,15 @@ class FakeManager {
   currentTime(): number { return 10_000; }
   list(): readonly Job[] { this.listCalls += 1; return structuredClone(this.jobs); }
   subscribe(listener: (jobs: readonly Job[]) => void): () => void {
+    this.lifecycleEvents?.push("subscribe");
     this.listeners.add(listener);
+    this.capturedListeners.push(listener);
     listener(this.list());
-    return () => { this.unsubscribeCalls += 1; this.listeners.delete(listener); };
+    return () => {
+      this.lifecycleEvents?.push("unsubscribe");
+      this.unsubscribeCalls += 1;
+      this.listeners.delete(listener);
+    };
   }
   async cancel(id: string): Promise<Job> {
     this.calls.push(`cancel:${id}`);
@@ -68,6 +76,7 @@ class FakeUi {
   readonly notifications: Array<[string, string | undefined]> = [];
   rows = 24;
   component: SubagentsDashboard | undefined;
+  lifecycleEvents: string[] | undefined;
   doneCalls = 0;
   renderRequests = 0;
   setWidget(_key: string, content: unknown): void { this.widgets.push(content); }
@@ -79,6 +88,7 @@ class FakeUi {
         requestRender: () => { this.renderRequests += 1; },
         terminal: { get rows() { return thisOwner.rows; } },
       }, theme, {}, () => {
+        this.lifecycleEvents?.push("done");
         this.doneCalls += 1;
         resolve();
       });
@@ -518,6 +528,76 @@ test("registration updates and clears the compact widget from live manager chang
   assert.equal(pi.ui.widgets.at(-1), undefined);
   cleanup();
   assert.equal(manager.unsubscribeCalls, 1);
+});
+
+test("captured manager callback cannot render after Escape closes the dashboard", async () => {
+  const pi = new FakePi();
+  const manager = new FakeManager([job("job-1", "running")]);
+  registerSubagentsUi(pi as never, manager as never);
+  const command = pi.commands.get("subagents");
+  assert.ok(command);
+
+  const opening = command("", context(pi));
+  const view = pi.ui.component;
+  const captured = manager.capturedListeners.at(-1);
+  assert.ok(view);
+  assert.ok(captured);
+  view.handleInput?.("\x1b");
+  await opening;
+  const renderRequests = pi.ui.renderRequests;
+
+  captured([job("job-1", "completed")]);
+
+  assert.equal(pi.ui.renderRequests, renderRequests);
+});
+
+test("registration cleanup closes the active dashboard and clears resources once", async () => {
+  const pi = new FakePi();
+  const manager = new FakeManager([job("job-1", "running")]);
+  const cleanup = registerSubagentsUi(pi as never, manager as never);
+  await pi.emit("session_start", context(pi));
+  const command = pi.commands.get("subagents");
+  assert.ok(command);
+
+  const opening = command("", context(pi));
+  assert.ok(pi.ui.component);
+  const capturedListeners = [...manager.capturedListeners];
+  cleanup();
+  cleanup();
+
+  assert.equal(pi.ui.doneCalls, 1);
+  await opening;
+  assert.equal(manager.unsubscribeCalls, 2);
+  assert.equal(manager.listeners.size, 0);
+  assert.equal(pi.ui.widgets.at(-1), undefined);
+  const renderRequests = pi.ui.renderRequests;
+  manager.setJobs([job("job-1", "completed")]);
+  for (const captured of capturedListeners) captured([job("job-1", "completed")]);
+  assert.equal(pi.ui.renderRequests, renderRequests);
+  assert.equal(pi.ui.widgets.at(-1), undefined);
+  assert.equal(manager.unsubscribeCalls, 2);
+});
+
+test("replacement session closes the active dashboard before installing its widget subscription", async () => {
+  const pi = new FakePi();
+  const manager = new FakeManager([job("job-1", "running")]);
+  const lifecycleEvents: string[] = [];
+  pi.ui.lifecycleEvents = lifecycleEvents;
+  manager.lifecycleEvents = lifecycleEvents;
+  registerSubagentsUi(pi as never, manager as never);
+  await pi.emit("session_start", context(pi));
+  const command = pi.commands.get("subagents");
+  assert.ok(command);
+  const opening = command("", context(pi));
+  assert.ok(pi.ui.component);
+  lifecycleEvents.length = 0;
+
+  await pi.emit("session_start", context(pi));
+
+  assert.equal(pi.ui.doneCalls, 1);
+  await opening;
+  assert.deepEqual(lifecycleEvents, ["unsubscribe", "done", "unsubscribe", "subscribe"]);
+  assert.equal(manager.listeners.size, 1);
 });
 
 test("subagents command rejects non-TUI mode and reads the live terminal row count", async () => {
