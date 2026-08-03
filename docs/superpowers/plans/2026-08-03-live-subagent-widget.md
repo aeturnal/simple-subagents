@@ -120,6 +120,28 @@ test("uses thinking fallback and removes the final activity continuation", () =>
   assert.match(text[1] ?? "", /^└─ ⠋/);
   assert.equal(text[2], "     ⎿ thinking…");
 });
+
+test("selects and wraps spinner frames", () => {
+  assert.match(plain(render([job("running", "running")], 10_000, 2)[1] ?? ""), /⠹/);
+  assert.match(plain(render([job("running", "running")], 10_000, 12)[1] ?? ""), /⠹/);
+});
+
+test("lingers before but not at the exact three-second boundary", () => {
+  const finished = job("done", "completed", { finishedAt: 8_000 });
+  assert.notDeepEqual(render([finished], 10_999), []);
+  assert.deepEqual(render([finished], 11_000), []);
+});
+
+test("clamps skewed durations and bounds every visible line", () => {
+  const jobs = [job("future", "running", {
+    startedAt: 20_000,
+    request: { task: "A very long task name with emoji 😀 and CJK 漢字", agent: "reviewer", writeAccess: false },
+  })];
+  assert.match(plain(render(jobs, 10_000, 0, 120)[1] ?? ""), /0\.0s$/);
+  for (const width of [1, 4, 8, 20, 40, 120]) {
+    for (const line of render(jobs, 10_000, 0, width)) assert.ok(visibleWidth(line) <= width);
+  }
+});
 ```
 
 - [ ] **Step 2: Run the new test and verify RED**
@@ -225,9 +247,9 @@ Run:
 npx tsx --test test/live-widget.test.ts
 ```
 
-Expected: the first three tests pass with 0 failures.
+Expected: all six initial formatter tests pass with 0 failures.
 
-- [ ] **Step 5: Add failing tests for turns, tool-use counting, tokens, duration, spinner frames, linger boundary, and width**
+- [ ] **Step 5: Add failing tests for turns, tool-use counting, tokens, and duration**
 
 Append focused tests:
 
@@ -254,27 +276,6 @@ test("uses singular stat labels and compact million tokens", () => {
   assert.match(text, /↻1 · 1 tool use · 1\.2M tokens/);
 });
 
-test("selects and wraps spinner frames", () => {
-  assert.match(plain(render([job("running", "running")], 10_000, 2)[1] ?? ""), /⠹/);
-  assert.match(plain(render([job("running", "running")], 10_000, 12)[1] ?? ""), /⠹/);
-});
-
-test("lingers before but not at the exact three-second boundary", () => {
-  const finished = job("done", "completed", { finishedAt: 8_000 });
-  assert.notDeepEqual(render([finished], 10_999), []);
-  assert.deepEqual(render([finished], 11_000), []);
-});
-
-test("clamps skewed durations and bounds every visible line", () => {
-  const jobs = [job("future", "running", {
-    startedAt: 20_000,
-    request: { task: "A very long task name with emoji 😀 and CJK 漢字", agent: "reviewer", writeAccess: false },
-  })];
-  assert.match(plain(render(jobs, 10_000, 0, 120)[1] ?? ""), /0\.0s$/);
-  for (const width of [1, 4, 8, 20, 40, 120]) {
-    for (const line of render(jobs, 10_000, 0, width)) assert.ok(visibleWidth(line) <= width);
-  }
-});
 ```
 
 - [ ] **Step 6: Run the tests and verify the new assertions fail for missing stats**
@@ -285,7 +286,7 @@ Run:
 npx tsx --test test/live-widget.test.ts
 ```
 
-Expected: FAIL in the statistics tests because the initial formatter emits duration only. The spinner, linger, and width assertions may already pass; the run is still a valid RED because the new stats behavior is absent.
+Expected: FAIL in both statistics tests because the initial formatter emits duration only.
 
 - [ ] **Step 7: Implement compact statistics without changing selection or activity behavior**
 
