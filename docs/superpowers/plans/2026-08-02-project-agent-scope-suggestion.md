@@ -15,7 +15,8 @@
 - Preserve the built-in `generic` profile as reserved.
 - Project profiles override same-named user profiles only in `both` scope.
 - Project profile launches require confirmation by default and fail closed when confirmation is unavailable.
-- Do not change source code, tests, `README.md`, or package behavior.
+- Do not change source code, tests, `README.md`, or package behavior now.
+- Require the future feature implementation to update `README.md` with scope, precedence, discovery, and confirmation behavior.
 
 ---
 
@@ -45,6 +46,8 @@ Keep `user` as the default. For `project`, discover the nearest `.pi/agents/` di
 Project profiles are repository-controlled prompts. Confirm once before launching any selected project profiles in a batch. Reject the complete launch when confirmation is declined or unavailable, while allowing a user-controlled `confirmProjectAgents: false` setting for trusted automation.
 
 Use one shared scoped-discovery interface for listing and launching profiles. Preserve the existing background start, status, wait, cancellation, and collection model; do not add the bundled example's synchronous or chain behavior as part of this work.
+
+When implemented, update `README.md` to document the three scopes, default `user` behavior, nearest project-profile discovery, project-over-user precedence, reserved `generic` profile, source labels, and project-agent confirmation configuration.
 ````
 
 - [ ] **Step 2: Renumber the existing lower-priority headings**
@@ -82,6 +85,7 @@ Expected:
 - Lower-priority headings are sequential from 9 through 13.
 - The new section says the existing file schema already matches Pi's bundled example.
 - The new section includes all three scopes, project-over-user precedence, reserved `generic`, source labels, confirmation, fail-closed behavior, and the trusted-automation setting.
+- The new section requires the future implementation to document the complete user-facing behavior in `README.md`.
 - No files other than `suggestion-box.md` are included in the implementation diff.
 - `git diff --check` exits successfully with no output.
 
