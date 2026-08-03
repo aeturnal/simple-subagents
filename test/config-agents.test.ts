@@ -144,6 +144,41 @@ test("skips model thinking suffixes and keeps ordinary colon models", async () =
   assert.match(diagnostic ?? "", /thinking: high/);
 });
 
+test("classifies missing, project, and duplicate profiles before invalid thinking", async () => {
+  const root = await mkdtemp(join(tmpdir(), "simple-subagents-agents-"));
+  const agentsDir = join(root, "agents");
+  await mkdir(agentsDir);
+  await writeFile(
+    join(agentsDir, "a-missing.md"),
+    `---\ndescription: Missing name\nthinking: ultra\n---\n`,
+  );
+  await writeFile(
+    join(agentsDir, "b-project.md"),
+    `---\nname: project-reviewer\ndescription: Excluded project\nsource: project\nthinking: ultra\n---\n`,
+  );
+  await writeFile(join(agentsDir, "c-first.md"), `---\nname: reviewer\ndescription: First\n---\n`);
+  await writeFile(
+    join(agentsDir, "d-duplicate.md"),
+    `---\nname: reviewer\ndescription: Duplicate\nthinking: ultra\n---\n`,
+  );
+
+  const result = await discoverAgents(agentsDir);
+
+  assert.deepEqual(result.agents.map((agent) => agent.name), ["generic", "reviewer"]);
+  assert.match(
+    result.diagnostics.find((note) => note.includes("a-missing.md")) ?? "",
+    /missing name or description/,
+  );
+  assert.match(
+    result.diagnostics.find((note) => note.includes("b-project.md")) ?? "",
+    /project profiles are excluded/,
+  );
+  assert.match(
+    result.diagnostics.find((note) => note.includes("d-duplicate.md")) ?? "",
+    /duplicate agent reviewer/,
+  );
+});
+
 test("agents directory read failures return a diagnostic", async () => {
   const root = await mkdtemp(join(tmpdir(), "simple-subagents-agents-"));
   const agentsDir = join(root, "agents");

@@ -121,12 +121,6 @@ export async function discoverAgents(agentsDir: string): Promise<DiscoverAgentsR
       continue;
     }
 
-    const error = profileThinkingError(frontmatter);
-    if (error) {
-      diagnostics.push(`Skipped ${filePath}: ${error}`);
-      continue;
-    }
-
     const agent = createAgent(filePath, frontmatter, body);
 
     if (!agent) {
@@ -140,6 +134,12 @@ export async function discoverAgents(agentsDir: string): Promise<DiscoverAgentsR
 
     if (seen.has(agent.name)) {
       diagnostics.push(`Skipped duplicate agent ${agent.name} in ${filePath}`);
+      continue;
+    }
+
+    const error = profileThinkingError(frontmatter);
+    if (error) {
+      diagnostics.push(`Skipped ${filePath}: ${error}`);
       continue;
     }
 
