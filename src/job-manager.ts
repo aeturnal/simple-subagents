@@ -417,12 +417,19 @@ export class JobManager {
       const truncation = originalBytes > keptBytes ? { originalBytes, keptBytes } : undefined;
       entry.job.progress = entry.job.progress.filter((progress) => progress.type !== "text");
       if (captured.text) entry.job.progress.push(structuredClone({ ...item, text: captured.text, truncation }));
+    } else if (item.type === "model") {
+      entry.job.progress = entry.job.progress.filter((progress) => progress.type !== "model");
+      entry.job.progress.push(structuredClone(item));
     } else {
       entry.job.progress.push(structuredClone(item));
-      const nonTextOverflow = entry.job.progress.filter((progress) => progress.type !== "text").length - MAX_PROGRESS_ITEMS;
-      if (nonTextOverflow > 0) {
-        let remaining = nonTextOverflow;
-        entry.job.progress = entry.job.progress.filter((progress) => progress.type === "text" || remaining-- <= 0);
+      const historyOverflow = entry.job.progress.filter(
+        (progress) => progress.type !== "text" && progress.type !== "model",
+      ).length - MAX_PROGRESS_ITEMS;
+      if (historyOverflow > 0) {
+        let remaining = historyOverflow;
+        entry.job.progress = entry.job.progress.filter(
+          (progress) => progress.type === "text" || progress.type === "model" || remaining-- <= 0,
+        );
       }
     }
     this.notify();

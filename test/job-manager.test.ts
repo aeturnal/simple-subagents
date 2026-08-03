@@ -510,6 +510,36 @@ test("retains only the newest 200 progress items", () => {
   assert.equal(progress?.length, 200);
   assert.equal(progress?.[0]?.text, "event 1");
   assert.equal(progress?.at(-1)?.text, "event 200");
+
+  runner.progress(0, { type: "model", text: "Model reasoning", timestamp: 202 });
+  const retained = manager.get(job.id)?.progress ?? [];
+  assert.equal(retained.filter((item) => item.type === "tool").length, 200);
+  assert.equal(retained.filter((item) => item.type === "model").length, 1);
+});
+
+test("retains one latest model activity without consuming tool and diagnostic history", () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  const [job] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.ok(job);
+
+  for (let index = 0; index < 199; index += 1) {
+    runner.progress(0, { type: "tool", text: `event ${index}`, timestamp: index });
+  }
+  runner.progress(0, { type: "diagnostic", text: "diagnostic", timestamp: 199 });
+  runner.progress(0, { type: "model", text: "Model turn started", timestamp: 200 });
+  runner.progress(0, { type: "text", text: "partial answer", timestamp: 201 });
+  runner.progress(0, { type: "model", text: "Model reasoning", timestamp: 202 });
+
+  const progress = manager.get(job.id)?.progress ?? [];
+  assert.equal(progress.filter((item) => item.type === "tool" || item.type === "diagnostic").length, 200);
+  assert.deepEqual(progress.filter((item) => item.type === "model"), [
+    { type: "model", text: "Model reasoning", timestamp: 202 },
+  ]);
+  assert.deepEqual(progress.filter((item) => item.type === "text"), [
+    { type: "text", text: "partial answer", timestamp: 201, truncation: undefined },
+  ]);
+  assert.equal(progress.at(-1)?.type, "model");
 });
 
 test("retains only the latest text progress alongside bounded non-text history", () => {
