@@ -312,25 +312,18 @@ git commit -m "feat: expose safe model activity"
 
 ---
 
-### Task 2: Coalesce and present model activity everywhere
+### Task 2: Coalesce model activity in the job manager
 
 **Files:**
 
 - Modify: `src/job-manager.ts:410-429`
-- Modify: `src/job-status.ts:53-57,98-120`
-- Modify: `test/job-manager.test.ts:499-531`
-- Modify: `test/job-status.test.ts:60-75`
-- Modify: `test/tools.test.ts:520-560`
-- Modify: `test/dashboard.test.ts:190-230`
-- Modify: `test/live-widget.test.ts:35-70`
-- Modify: `README.md:28-45`
+- Test: `test/job-manager.test.ts:499-531`
 
 **Interfaces:**
 
 - Consumes: `ProgressItem` with `type: "model"` and one of the four fixed labels from Task 1.
-- Produces: `StatusActivity.kind` includes `"model"`.
 - Produces: one retained model activity per job, independent of the 200-item tool/diagnostic history and one retained partial-answer record.
-- Produces: shared model activity visible through `projectJobStatus`, and therefore through `subagent_status`, `/subagents`, and `formatLiveWidgetLines`.
+- Produces: chronologically ordered progress consumed by the shared status projection in Task 3.
 
 - [ ] **Step 1: Add failing manager tests for replacement, ordering, and independent bounds**
 
@@ -372,9 +365,88 @@ assert.equal(retained.filter((item) => item.type === "tool").length, 200);
 assert.equal(retained.filter((item) => item.type === "model").length, 1);
 ```
 
-- [ ] **Step 2: Add failing shared-projection and surface tests**
+- [ ] **Step 2: Run the focused manager test to verify RED**
 
-Extend the activity test in `test/job-status.test.ts` with a model record and exact expected kind. Keep only four total records if needed so the final three are deterministic:
+Run:
+
+```sh
+npx tsx --test --test-name-pattern="latest model activity|newest 200 progress" test/job-manager.test.ts
+```
+
+Expected: FAIL because model records accumulate and count against the existing non-text limit.
+
+- [ ] **Step 3: Coalesce model activity independently in `JobManager`**
+
+Refactor `JobManager.addProgress` into three explicit branches while preserving the existing text truncation block:
+
+```ts
+if (item.type === "text") {
+  const captured = truncateUtf8(item.text, CAPTURED_TEXT_MAX_BYTES);
+  const originalBytes = item.truncation?.originalBytes ?? Buffer.byteLength(item.text, "utf8");
+  const keptBytes = Buffer.byteLength(captured.text, "utf8");
+  const truncation = originalBytes > keptBytes ? { originalBytes, keptBytes } : undefined;
+  entry.job.progress = entry.job.progress.filter((progress) => progress.type !== "text");
+  if (captured.text) entry.job.progress.push(structuredClone({ ...item, text: captured.text, truncation }));
+} else if (item.type === "model") {
+  entry.job.progress = entry.job.progress.filter((progress) => progress.type !== "model");
+  entry.job.progress.push(structuredClone(item));
+} else {
+  entry.job.progress.push(structuredClone(item));
+  const historyOverflow = entry.job.progress.filter(
+    (progress) => progress.type !== "text" && progress.type !== "model",
+  ).length - MAX_PROGRESS_ITEMS;
+  if (historyOverflow > 0) {
+    let remaining = historyOverflow;
+    entry.job.progress = entry.job.progress.filter(
+      (progress) => progress.type === "text" || progress.type === "model" || remaining-- <= 0,
+    );
+  }
+}
+this.notify();
+```
+
+Do not add a second manager field, timer, or notification path. An accepted model update produces exactly one normal manager notification.
+
+- [ ] **Step 4: Run the complete manager suite and typecheck**
+
+Run:
+
+```sh
+npx tsx --test test/job-manager.test.ts
+npm run typecheck
+```
+
+Expected: all manager tests pass and TypeScript reports no errors.
+
+- [ ] **Step 5: Commit bounded model retention**
+
+```sh
+git add src/job-manager.ts test/job-manager.test.ts
+git commit -m "feat: retain latest model activity"
+```
+
+---
+
+### Task 3: Project and display model activity everywhere
+
+**Files:**
+
+- Modify: `src/job-status.ts:53-57,98-120`
+- Test: `test/job-status.test.ts:60-75`
+- Test: `test/tools.test.ts:520-560`
+- Test: `test/dashboard.test.ts:190-230`
+- Test: `test/live-widget.test.ts:35-70`
+- Modify: `README.md:28-45`
+
+**Interfaces:**
+
+- Consumes: chronologically ordered, coalesced `model` progress from Task 2.
+- Produces: `StatusActivity.kind` includes `"model"`.
+- Produces: shared model activity visible through `projectJobStatus`, and therefore through `subagent_status`, `/subagents`, and `formatLiveWidgetLines`.
+
+- [ ] **Step 1: Add failing shared-projection and surface tests**
+
+Extend the activity test in `test/job-status.test.ts` with a model record and exact expected kind. Keep only three records so the complete projected list is deterministic:
 
 ```ts
 const status = projectJobStatus(job("running", { progress: [
@@ -418,49 +490,17 @@ test("renders the latest model activity for a running job", () => {
 
 The runner privacy test from Task 1 is the trust-boundary proof that hostile reasoning payload text never becomes a `ProgressItem`; these presentation tests consume only the fixed record emitted by that boundary.
 
-- [ ] **Step 3: Run focused tests to verify RED**
+- [ ] **Step 2: Run focused projection and surface tests to verify RED**
 
 Run:
 
 ```sh
-npx tsx --test --test-name-pattern="latest model activity|chronological activity|renders the latest model|tool renderers preserve|compact details use shared" test/job-manager.test.ts test/job-status.test.ts test/tools.test.ts test/dashboard.test.ts test/live-widget.test.ts
+npx tsx --test --test-name-pattern="chronological activity|renders the latest model|tool renderers preserve|compact details use shared" test/job-status.test.ts test/tools.test.ts test/dashboard.test.ts test/live-widget.test.ts
 ```
 
-Expected: the manager test FAILS because model records accumulate and count against the existing non-text limit; the status projection test FAILS because model activity is currently classified as `diagnostic`. Surface display assertions may already pass through the shared generic summary path, which is acceptable; they are regression coverage for the final contract.
+Expected: the status projection test FAILS because model activity is currently classified as `diagnostic`. Surface display assertions may already pass through the shared generic summary path, which is acceptable; they are regression coverage for the final contract.
 
-- [ ] **Step 4: Coalesce model activity independently in `JobManager`**
-
-Refactor `JobManager.addProgress` into three explicit branches while preserving the existing text truncation block:
-
-```ts
-if (item.type === "text") {
-  const captured = truncateUtf8(item.text, CAPTURED_TEXT_MAX_BYTES);
-  const originalBytes = item.truncation?.originalBytes ?? Buffer.byteLength(item.text, "utf8");
-  const keptBytes = Buffer.byteLength(captured.text, "utf8");
-  const truncation = originalBytes > keptBytes ? { originalBytes, keptBytes } : undefined;
-  entry.job.progress = entry.job.progress.filter((progress) => progress.type !== "text");
-  if (captured.text) entry.job.progress.push(structuredClone({ ...item, text: captured.text, truncation }));
-} else if (item.type === "model") {
-  entry.job.progress = entry.job.progress.filter((progress) => progress.type !== "model");
-  entry.job.progress.push(structuredClone(item));
-} else {
-  entry.job.progress.push(structuredClone(item));
-  const historyOverflow = entry.job.progress.filter(
-    (progress) => progress.type !== "text" && progress.type !== "model",
-  ).length - MAX_PROGRESS_ITEMS;
-  if (historyOverflow > 0) {
-    let remaining = historyOverflow;
-    entry.job.progress = entry.job.progress.filter(
-      (progress) => progress.type === "text" || progress.type === "model" || remaining-- <= 0,
-    );
-  }
-}
-this.notify();
-```
-
-Do not add a second manager field, timer, or notification path. An accepted model update produces exactly one normal manager notification.
-
-- [ ] **Step 5: Project model activity with a distinct kind**
+- [ ] **Step 3: Project model activity with a distinct kind**
 
 In `src/job-status.ts`, extend the public-safe kind union:
 
@@ -483,17 +523,17 @@ return [{ timestamp: item.timestamp, kind: "diagnostic", summary: text }];
 
 Keep `boundedPreview` on every summary. Do not parse model labels in presentation code.
 
-- [ ] **Step 6: Run focused retention and surface tests to verify GREEN**
+- [ ] **Step 4: Run focused projection and surface tests to verify GREEN**
 
 Run:
 
 ```sh
-npx tsx --test test/job-manager.test.ts test/job-status.test.ts test/tools.test.ts test/dashboard.test.ts test/live-widget.test.ts
+npx tsx --test test/job-status.test.ts test/tools.test.ts test/dashboard.test.ts test/live-widget.test.ts
 ```
 
 Expected: all selected tests pass. Confirm the existing `thinking…` live-widget fallback test still passes for a job with no activity.
 
-- [ ] **Step 7: Document model activity and privacy**
+- [ ] **Step 5: Document model activity and privacy**
 
 In `README.md`, immediately after the paragraph describing the above-editor tree and before the `subagent_status` paragraph, add:
 
@@ -509,7 +549,7 @@ Update the representative status example so one recent activity line is:
 
 Do not claim that every provider emits reasoning events or that this feature detects stalls.
 
-- [ ] **Step 8: Run the complete required verification**
+- [ ] **Step 6: Run the complete required verification**
 
 Run LSP before broad commands:
 
@@ -548,7 +588,7 @@ lens_diagnostics mode=all
 
 Expected: no blocking errors or unresolved warnings in edited files.
 
-- [ ] **Step 9: Review the final diff against the approved boundaries**
+- [ ] **Step 7: Review the final diff against the approved boundaries**
 
 Run:
 
@@ -562,27 +602,26 @@ rg -n "SECRET_|PRIVATE_AFTER_RESET|PRIVATE|thinking_delta" src README.md
 Expected:
 
 - `git diff --check` prints nothing.
-- Only the files listed by this task are changed after the Task 1 commit.
+- Only the files listed by this task are changed after the Task 2 commit.
 - Secret test markers occur only in tests; no source or README line contains them.
 - Source may match `thinking_delta` only in the event discriminator and must not read or retain its payload.
 - No execution deadline, cancellation, child-extension, stall-detection, or unrelated profile change appears.
 
-- [ ] **Step 10: Commit retention, presentation, and documentation**
+- [ ] **Step 8: Commit presentation and documentation**
 
 ```sh
-git add src/job-manager.ts src/job-status.ts README.md \
-  test/job-manager.test.ts test/job-status.test.ts test/tools.test.ts \
+git add src/job-status.ts README.md test/job-status.test.ts test/tools.test.ts \
   test/dashboard.test.ts test/live-widget.test.ts
 git commit -m "feat: show model activity across status views"
 ```
 
-- [ ] **Step 11: Confirm the branch is ready for review**
+- [ ] **Step 9: Confirm the branch is ready for review**
 
 Run:
 
 ```sh
 git status --short --branch
-git log --oneline -3
+git log --oneline -5
 ```
 
-Expected: clean working tree with the two implementation commits above the approved design and plan commits.
+Expected: clean working tree with three focused implementation commits above the approved design and plan commits.
