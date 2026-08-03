@@ -146,7 +146,9 @@ export function projectJobStatus(job: Readonly<Job>, now: number): JobStatus {
 export function selectStatusList(jobs: readonly Job[], now: number): StatusListResult {
   const group = (state: JobState): number => {
     const lifecycle = inspectJobState(state);
-    return lifecycle.settled ? lifecycle.inbox ? 1 : 2 : 0;
+    if (!lifecycle.settled) return 0;
+    if (lifecycle.inbox) return 1;
+    return 2;
   };
   const statuses = jobs
     .map((job, index) => ({ index, status: projectJobStatus(job, now) }))
