@@ -79,7 +79,7 @@ Model values are opaque Pi IDs or patterns. Values such as `ollama/llama3.1:8b` 
 
 Start and status views report **Launch model** and **Launch thinking**, which describe the arguments selected by this extension. Collected output reports Pi's **Reported model** separately; both model values are shown when resolution produces a different model ID. Overrides do not change the profile prompt, tools, access mode, working directory, parent model, or sibling jobs.
 
-Use `subagent_agents({})` when profile names or capabilities are unknown. It returns profiles in discovery order (built-in `generic` first), including configured model inheritance and the read-only and writable tool allowlists passed when child Pi starts. These are launch ceilings, not guarantees of effective runtime tools: trusted child extensions may alter active tools.
+Use `subagent_agents({})` when profile names or capabilities are unknown. It returns profiles in discovery order (built-in `generic` first), including configured model inheritance and the read-only and writable tool allowlists passed when child Pi starts. Children run with Pi extension discovery disabled. Profile tool lists therefore select built-in tools only; extension-provided web, MCP, diagnostic, nested-subagent, UI, and lifecycle behavior is unavailable. For research that needs external sources, have the parent fetch or clone them before starting a child that analyzes the local copies.
 
 A writable launch allowlist does not authorize a job to write. The parent must still start that job with `writeAccess: true`, and configured write confirmation still applies. Discovery never returns profile system prompts, profile file paths, raw frontmatter, discovery diagnostics, credentials, or parent session context.
 

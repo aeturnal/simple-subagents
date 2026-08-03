@@ -133,7 +133,13 @@ export class PiProcessRunner implements ProcessRunner {
     const parser = new JsonLineParser();
     const usage = emptyUsage();
     const { modelArgument, thinkingArgument } = options.launchOptions;
-    const args = ["--mode", "json", "-p", "--no-session"];
+    const args = [
+      "--mode",
+      "json",
+      "-p",
+      "--no-session",
+      "--no-extensions",
+    ];
     if (modelArgument) args.push("--model", modelArgument);
     if (thinkingArgument) args.push("--thinking", thinkingArgument);
 

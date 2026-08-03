@@ -56,6 +56,12 @@ integrationTest("real Pi reads a file with the generic read-only profile", { tim
 
   assert.ok(invocation);
   assert.equal(invocation.command, "pi");
+  assert.equal(
+    invocation.args.filter((argument) => argument === "--no-extensions").length,
+    1,
+  );
+  assert.equal(invocation.args.includes("--extension"), false);
+  assert.equal(invocation.args.includes("-e"), false);
   const enabledTools = invocation.args[invocation.args.indexOf("--tools") + 1]?.split(",") ?? [];
   assert.ok(invocation.args.includes("--tools"));
   assert.equal(enabledTools.includes("bash"), false);

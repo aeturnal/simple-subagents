@@ -75,6 +75,15 @@ const argumentValue = (args: string[], name: string): string | undefined => {
   return index < 0 ? undefined : args[index + 1];
 };
 
+const assertIsolatedInvocation = (args: readonly string[]): void => {
+  assert.equal(
+    args.filter((argument) => argument === "--no-extensions").length,
+    1,
+  );
+  assert.equal(args.includes("--extension"), false);
+  assert.equal(args.includes("-e"), false);
+};
+
 test("launches Pi without a shell using the current script and generic read-only tools", async () => {
   const { child, runner, invocation } = spawnedRunner();
 
@@ -87,7 +96,15 @@ test("launches Pi without a shell using the current script and generic read-only
   const actual = invocation();
 
   assert.equal(actual.command, process.execPath);
-  assert.deepEqual(actual.args.slice(0, 5), [process.argv[1], "--mode", "json", "-p", "--no-session"]);
+  assert.deepEqual(actual.args.slice(0, 6), [
+    process.argv[1],
+    "--mode",
+    "json",
+    "-p",
+    "--no-session",
+    "--no-extensions",
+  ]);
+  assertIsolatedInvocation(actual.args);
   assert.equal(argumentValue(actual.args, "--tools"), "read,grep,find,ls");
   assert.equal(actual.args.at(-1), "Inspect the repository");
   assert.deepEqual(actual.spawnOptions, {
@@ -132,7 +149,7 @@ test("falls back to the pi command for a Bun virtual current script", async () =
   }
 });
 
-test("keeps legacy process arguments byte-for-byte unchanged", async () => {
+test("passes legacy launch options with child extension isolation", async () => {
   const { child, runner, invocation } = spawnedRunner();
   const legacyProfile = profile({ systemPrompt: "" });
   const legacyRequest = request();
@@ -143,9 +160,18 @@ test("keeps legacy process arguments byte-for-byte unchanged", async () => {
   }));
 
   assert.deepEqual(invocation().args, [
-    process.argv[1], "--mode", "json", "-p", "--no-session",
-    "--model", "ollama/llama3.1:8b:high", "--no-tools", "Inspect the repository",
+    process.argv[1],
+    "--mode",
+    "json",
+    "-p",
+    "--no-session",
+    "--no-extensions",
+    "--model",
+    "ollama/llama3.1:8b:high",
+    "--no-tools",
+    "Inspect the repository",
   ]);
+  assertIsolatedInvocation(invocation().args);
   child.close();
   await running.result;
 });
@@ -172,6 +198,7 @@ test("passes opaque override model and explicit thinking as separate arguments",
     assert.equal(argumentValue(invocation().args, "--model"), model);
     assert.equal(argumentValue(invocation().args, "--thinking"), "low");
     assert.equal(argumentValue(invocation().args, "--tools"), "read");
+    assertIsolatedInvocation(invocation().args);
     child.close();
     await running.result;
   }
@@ -193,6 +220,7 @@ test("passes thinking without model when child Pi must select its default", asyn
 
   assert.equal(argumentValue(invocation().args, "--model"), undefined);
   assert.equal(argumentValue(invocation().args, "--thinking"), "max");
+  assertIsolatedInvocation(invocation().args);
   child.close();
   await running.result;
 });
@@ -207,6 +235,7 @@ test("intersects named read-only profile tools with the read-only permission set
   }));
 
   assert.equal(argumentValue(invocation().args, "--tools"), "read");
+  assertIsolatedInvocation(invocation().args);
   child.close();
   await running.result;
 });
@@ -256,6 +285,7 @@ test("permits requested write tools for writable named profiles", async () => {
     getLaunchToolAllowlist(selected, "write").join(","),
   );
   assert.equal(argumentValue(invocation().args, "--tools"), "read,bash,edit,write");
+  assertIsolatedInvocation(invocation().args);
   child.close();
   await running.result;
 });
