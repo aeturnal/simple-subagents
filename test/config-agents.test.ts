@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { loadConfig } from "../src/config.js";
 import { discoverAgents } from "../src/agents.js";
+import { THINKING_LEVELS } from "../src/types.js";
 
 test("missing config falls back safely", async () => {
   const root = await mkdtemp(join(tmpdir(), "simple-subagents-config-"));
@@ -64,13 +65,83 @@ test("discovers generic and user markdown profiles", async () => {
   const root = await mkdtemp(join(tmpdir(), "simple-subagents-agents-"));
   const agentsDir = join(root, "agents");
   await mkdir(agentsDir);
-  await writeFile(join(agentsDir, "reviewer.md"), `---\nname: reviewer\ndescription: Reviews code\ntools: read, grep\n---\nReturn line-referenced findings.\n`);
+  await writeFile(join(agentsDir, "reviewer.md"), `---\nname: reviewer\ndescription: Reviews code\ntools: read, grep\nmodel: openai-codex/gpt-5.6-sol\nthinking: medium\n---\nReturn line-referenced findings.\n`);
 
   const result = await discoverAgents(agentsDir);
 
   assert.deepEqual(result.agents.map((agent) => agent.name), ["generic", "reviewer"]);
   assert.deepEqual(result.agents[1]?.tools, ["read", "grep"]);
+  assert.equal(result.agents[1]?.model, "openai-codex/gpt-5.6-sol");
+  assert.equal(result.agents[1]?.thinking, "medium");
   assert.equal(result.agents[1]?.systemPrompt, "Return line-referenced findings.");
+});
+
+test("preserves every valid profile thinking level", async () => {
+  const root = await mkdtemp(join(tmpdir(), "simple-subagents-agents-"));
+  const agentsDir = join(root, "agents");
+  await mkdir(agentsDir);
+
+  for (const thinking of THINKING_LEVELS) {
+    await writeFile(
+      join(agentsDir, `thinking-${thinking}.md`),
+      `---\nname: ${thinking}\ndescription: ${thinking} profile\nthinking: ${thinking}\n---\n`,
+    );
+  }
+
+  const result = await discoverAgents(agentsDir);
+
+  assert.deepEqual(result.agents.slice(1).map((agent) => agent.thinking).sort(), [...THINKING_LEVELS].sort());
+});
+
+test("skips profiles with invalid thinking and continues discovery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "simple-subagents-agents-"));
+  const agentsDir = join(root, "agents");
+  await mkdir(agentsDir);
+  const invalidProfiles = [
+    ["invalid-medium-spaces", '" medium "'],
+    ["invalid-medium-uppercase", "MEDIUM"],
+    ["invalid-number", "1"],
+    ["invalid-ultra", "ultra"],
+  ] as const;
+
+  for (const [name, thinking] of invalidProfiles) {
+    await writeFile(
+      join(agentsDir, `${name}.md`),
+      `---\nname: ${name}\ndescription: Invalid thinking\nthinking: ${thinking}\n---\n`,
+    );
+  }
+  await writeFile(join(agentsDir, "valid.md"), `---\nname: valid\ndescription: Valid thinking\nthinking: high\n---\n`);
+
+  const result = await discoverAgents(agentsDir);
+
+  assert.deepEqual(result.agents.map((agent) => agent.name), ["generic", "valid"]);
+  for (const [name] of invalidProfiles) {
+    const diagnostic = result.diagnostics.find((note) => note.includes(`${name}.md`));
+    assert.match(diagnostic ?? "", /thinking/);
+    assert.match(diagnostic ?? "", /off, minimal, low, medium, high, xhigh, max/);
+  }
+});
+
+test("skips model thinking suffixes and keeps ordinary colon models", async () => {
+  const root = await mkdtemp(join(tmpdir(), "simple-subagents-agents-"));
+  const agentsDir = join(root, "agents");
+  await mkdir(agentsDir);
+  await writeFile(
+    join(agentsDir, "reserved.md"),
+    `---\nname: reserved\ndescription: Reserved suffix\nmodel: openai-codex/gpt-5.6-sol:high\n---\n`,
+  );
+  await writeFile(
+    join(agentsDir, "valid.md"),
+    `---\nname: valid\ndescription: Ordinary colon model\nmodel: ollama/llama3.1:8b\n---\n`,
+  );
+
+  const result = await discoverAgents(agentsDir);
+
+  assert.deepEqual(result.agents.map((agent) => agent.name), ["generic", "valid"]);
+  assert.equal(result.agents[1]?.model, "ollama/llama3.1:8b");
+  const diagnostic = result.diagnostics.find((note) => note.includes("reserved.md"));
+  assert.match(diagnostic ?? "", /:high/);
+  assert.match(diagnostic ?? "", /thinking: high/);
 });
 
 test("agents directory read failures return a diagnostic", async () => {

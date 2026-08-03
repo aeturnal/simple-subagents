@@ -17,6 +17,7 @@ export interface AgentProfile {
   systemPrompt: string;
   tools?: string[];
   model?: string;
+  thinking?: ThinkingLevel;
   source: "builtin" | "user";
   filePath?: string;
 }
