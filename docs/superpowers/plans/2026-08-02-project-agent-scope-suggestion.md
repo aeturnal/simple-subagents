@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add the approved project-agent scope proposal to `suggestion-box.md` without changing runtime behavior.
+**Goal:** Add the approved project-agent scope proposal to the local, Git-ignored `suggestion-box.md` without changing runtime behavior.
 
-**Architecture:** This is a documentation-only change. Add one lower-priority suggestion that summarizes the approved discovery, precedence, and confirmation behavior, then renumber the existing lower-priority items so heading numbers remain sequential.
+**Architecture:** This is a local documentation-only change. Add one lower-priority suggestion that summarizes the approved discovery, precedence, and confirmation behavior, then renumber the existing lower-priority items so heading numbers remain sequential. Keep `suggestion-box.md` ignored and untracked.
 
-**Tech Stack:** Markdown, Git.
+**Tech Stack:** Markdown.
 
 ## Global Constraints
 
@@ -17,6 +17,7 @@
 - Project profile launches require confirmation by default and fail closed when confirmation is unavailable.
 - Do not change source code, tests, `README.md`, or package behavior now.
 - Require the future feature implementation to update `README.md` with scope, precedence, discovery, and confirmation behavior.
+- Keep `suggestion-box.md` ignored and untracked; do not force-add or commit it.
 
 ---
 
@@ -76,8 +77,8 @@ Run:
 
 ```bash
 rg -n '^## |^### ' suggestion-box.md
-git diff --check
-git diff -- suggestion-box.md
+git check-ignore -v suggestion-box.md
+git ls-files --error-unmatch suggestion-box.md
 ```
 
 Expected:
@@ -86,12 +87,13 @@ Expected:
 - The new section says the existing file schema already matches Pi's bundled example.
 - The new section includes all three scopes, project-over-user precedence, reserved `generic`, source labels, confirmation, fail-closed behavior, and the trusted-automation setting.
 - The new section requires the future implementation to document the complete user-facing behavior in `README.md`.
-- No files other than `suggestion-box.md` are included in the implementation diff.
-- `git diff --check` exits successfully with no output.
+- `git check-ignore` identifies `/suggestion-box.md` in `.gitignore`.
+- `git ls-files --error-unmatch` exits with status 1, proving the file remains untracked.
 
-- [ ] **Step 4: Commit the documentation change**
+- [ ] **Step 4: Confirm no repository file changed during execution**
 
 ```bash
-git add suggestion-box.md
-git commit -m "docs: suggest project agent scopes"
+git status --short
 ```
+
+Expected: no output.
