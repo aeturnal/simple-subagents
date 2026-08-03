@@ -55,6 +55,7 @@ name: reviewer
 description: Review changed code
 tools: read, grep
 model: anthropic/claude-sonnet-4-5
+thinking: medium
 ---
 Return concise, line-referenced findings.
 ```
@@ -73,9 +74,11 @@ A start task can temporarily override its child model and thinking level without
 }
 ```
 
-Both fields are optional. Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Model selection is job override, then profile, then parent session, then Pi's child default. A job model without a job thinking level inherits the parent thinking level when available.
+Both fields are optional. The seven supported thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
-Model values are opaque Pi IDs or patterns. Values such as `ollama/llama3.1:8b` and models with multiple colons are passed unchanged through `--model`; job thinking is passed separately through `--thinking`, so it overrides a thinking shorthand in the model pattern according to Pi's CLI precedence. Pi remains responsible for pattern resolution, model availability, provider credentials, and provider-specific validation.
+Thinking precedence is job `thinkingLevel`, then profile `thinking`, then the parent session, then Pi or the model default. Profile thinking is a default, not a lock: a job `thinkingLevel` overrides it. Model selection is job override, then profile, then parent session, then Pi's child default.
+
+Model values are opaque Pi IDs or patterns. Thinking is passed separately through `--thinking`, not encoded in `--model`. Final model suffixes equal to a normalized thinking level are rejected in profile and job models; use the separate thinking field instead. `ollama/llama3.1:8b` remains valid. Pi performs provider translation and clamping, as well as pattern resolution, model availability, and provider credential checks.
 
 Start and status views report **Launch model** and **Launch thinking**, which describe the arguments selected by this extension. Collected output reports Pi's **Reported model** separately; both model values are shown when resolution produces a different model ID. Overrides do not change the profile prompt, tools, access mode, working directory, parent model, or sibling jobs.
 
