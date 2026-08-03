@@ -346,7 +346,19 @@ test("emits fixed turn and throttled reasoning activity without exposing reasoni
     message: { role: "assistant" },
     assistantMessageEvent: { type: "thinking_delta", delta: "SECRET_BOUNDARY" },
   });
-  now = 6_001;
+  now = 10_999;
+  emit({
+    type: "message_update",
+    message: { role: "assistant" },
+    assistantMessageEvent: { type: "thinking_delta", delta: "SECRET_BEFORE_SECOND_HEARTBEAT" },
+  });
+  now = 11_000;
+  emit({
+    type: "message_update",
+    message: { role: "assistant" },
+    assistantMessageEvent: { type: "thinking_delta", delta: "SECRET_SECOND_HEARTBEAT" },
+  });
+  now = 11_001;
   emit({
     type: "message_update",
     message: { role: "assistant" },
@@ -360,8 +372,9 @@ test("emits fixed turn and throttled reasoning activity without exposing reasoni
       ["model", "Model turn started", 1_000],
       ["model", "Model reasoning", 1_000],
       ["model", "Model reasoning", 6_000],
-      ["model", "Model reasoning finished", 6_001],
-      ["model", "Model turn finished", 6_001],
+      ["model", "Model reasoning", 11_000],
+      ["model", "Model reasoning finished", 11_001],
+      ["model", "Model turn finished", 11_001],
     ],
   );
   assert.doesNotMatch(JSON.stringify(progress), /SECRET_/u);

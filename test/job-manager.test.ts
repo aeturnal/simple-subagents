@@ -502,19 +502,22 @@ test("retains only the newest 200 progress items", () => {
   const [job] = manager.enqueue(makeRequests(1), profiles, defaults);
   assert.ok(job);
 
-  for (let index = 0; index < 201; index += 1) {
+  for (let index = 0; index < 200; index += 1) {
     runner.progress(0, { type: "tool", text: `event ${index}`, timestamp: index });
   }
+  runner.progress(0, { type: "model", text: "Model reasoning", timestamp: 200 });
+  runner.progress(0, { type: "tool", text: "event 200", timestamp: 201 });
 
   const progress = manager.get(job.id)?.progress;
-  assert.equal(progress?.length, 200);
+  assert.equal(progress?.length, 201);
   assert.equal(progress?.[0]?.text, "event 1");
   assert.equal(progress?.at(-1)?.text, "event 200");
 
-  runner.progress(0, { type: "model", text: "Model reasoning", timestamp: 202 });
   const retained = manager.get(job.id)?.progress ?? [];
   assert.equal(retained.filter((item) => item.type === "tool").length, 200);
-  assert.equal(retained.filter((item) => item.type === "model").length, 1);
+  assert.deepEqual(retained.filter((item) => item.type === "model"), [
+    { type: "model", text: "Model reasoning", timestamp: 200 },
+  ]);
 });
 
 test("retains one latest model activity without consuming tool and diagnostic history", () => {
