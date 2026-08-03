@@ -88,7 +88,7 @@ test("invalid project confirmation configuration fails closed", async () => {
 
 For existing read-error, invalid-JSON, and invalid-object tests, assert that both confirmation flags fail closed to `true`. For a valid object missing one property, preserve the existing `confirmWrites: false` default and use `confirmProjectAgents: true`.
 
-In `test/tools.test.ts`, add `confirmProjectAgents: true` to every typed `loadConfig` fixture. This is a compile-only fixture update; project-confirmation behavior remains for Task 5.
+In `test/tools.test.ts`, add `confirmProjectAgents: true` to every typed `loadConfig` fixture. This is a compile-only fixture update; project-confirmation behavior remains for Tasks 6-7.
 
 - [ ] **Step 2: Run the focused tests and confirm they fail**
 
@@ -155,59 +155,147 @@ git commit -m "feat: add project agent confirmation config"
 
 ---
 
-### Task 2: Build scoped profile discovery and precedence
+### Task 2: Deepen single-directory profile loading
 
 **Files:**
 
 - Modify: `src/agents.ts:1-136`
-- Test: `test/config-agents.test.ts:64-190`
+- Test: `test/config-agents.test.ts:64-150`
 - Verify: `test/integration.test.ts`
 
 **Interfaces:**
 
-- Consumes: `AgentScope` and `ProfileSource` from Task 1.
-- Produces: the small external discovery seam `DiscoverScopedAgentsOptions` and `discoverScopedAgents(options)`.
-- Keeps internal: `findNearestProjectAgentsDir(startCwd)`; nearest-walk behavior is tested through `discoverScopedAgents` so callers do not learn an extra interface.
-- Preserves: `discoverAgents(agentsDir)` as the default-user compatibility wrapper used by integration tests.
+- Consumes: `ProfileSource` from Task 1.
+- Keeps internal: `discoverProfileDirectory(agentsDir, source)` and bounded diagnostic helpers.
+- Preserves: `discoverAgents(agentsDir)` as the user-only, built-in-first compatibility interface used by integration tests.
 
-- [ ] **Step 1: Replace the old exclusion test with failing scope tests**
+- [ ] **Step 1: Write failing loader and diagnostic tests**
 
-Remove `excludes project profiles`; source is now trusted directory metadata, not a public frontmatter selector. Add helpers and tests in `test/config-agents.test.ts` that create this tree:
+Keep the existing user-profile tests and add focused tests asserting:
 
-```text
-<root>/user-agents/a-user.md                     name: reviewer, description: User reviewer
-<root>/user-agents/b-user-helper.md              name: user-helper
-<root>/.pi/agents/root.md                        name: root-agent
-<root>/packages/app/.pi/agents/a-project.md      name: reviewer, description: Project reviewer
-<root>/packages/app/.pi/agents/b-project-helper.md name: project-helper
-<root>/packages/app/src/                      parent cwd
+- A user profile named `generic` cannot replace the built-in and emits a reserved-name diagnostic.
+- Duplicate user files keep alphabetically first content and emit one duplicate diagnostic.
+- Malformed files do not stop valid later files.
+- Missing directories return only `generic` with no diagnostics.
+- More than 20 malformed or duplicate files produce at most 20 finding records plus one omission record, with every record at most 512 UTF-8 bytes.
+- Diagnostics do not contain the temporary root path, profile prompt, YAML text, or raw parser error.
+- A user-directory file whose frontmatter explicitly says `source: project` remains excluded.
+
+Use the public `discoverAgents(agentsDir)` interface for these tests; do not export the private loader just for testing.
+
+- [ ] **Step 2: Run loader tests and confirm they fail**
+
+Run:
+
+```bash
+npx tsx --test --test-name-pattern='agents|reserved|duplicate|malformed|missing|diagnostic' test/config-agents.test.ts
 ```
 
-Add separate tests asserting:
+Expected: reserved `generic` handling or bounded path-safe diagnostics fail under the current implementation.
+
+- [ ] **Step 3: Extract the private directory loader**
+
+In `src/agents.ts`, keep `GENERIC_AGENT` private and add:
 
 ```ts
-const user = await discoverScopedAgents({
-  agentScope: "user",
-  userAgentsDir,
-  parentCwd,
-});
-assert.deepEqual(user.agents.map(({ name, source }) => ({ name, source })), [
-  { name: "generic", source: "builtin" },
-  { name: "reviewer", source: "user" },
-  { name: "user-helper", source: "user" },
-]);
+interface DirectoryDiscoveryResult {
+  agents: AgentProfile[];
+  diagnostics: string[];
+}
 
-const project = await discoverScopedAgents({
-  agentScope: "project",
-  userAgentsDir,
-  parentCwd,
-});
-assert.deepEqual(project.agents.map(({ name, source }) => ({ name, source })), [
-  { name: "generic", source: "builtin" },
-  { name: "reviewer", source: "project" },
-  { name: "project-helper", source: "project" },
-]);
+async function discoverProfileDirectory(
+  agentsDir: string,
+  source: Exclude<ProfileSource, "builtin">,
+): Promise<DirectoryDiscoveryResult>
+```
 
+The loader must return empty arrays on `ENOENT`, sort Markdown files by filename, assign trusted `source` from its argument, keep the first same-source duplicate, and never add `generic` itself. Preserve the defense that skips `source: project` frontmatter only when loading the user directory.
+
+- [ ] **Step 4: Bound and sanitize loader diagnostics**
+
+Use this local helper so the private loader does not depend on public profile formatting:
+
+```ts
+const sanitizeDiagnosticText = (value: string): string =>
+  truncateUtf8(
+    value.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ").replace(/\s+/gu, " ").trim(),
+    512,
+  ).text.trim();
+```
+
+Store diagnostics through one accumulator that retains at most 20 findings and counts the rest. Append `Omitted N additional profile diagnostics.` when needed. Diagnostic records may identify the trusted source and sanitized filename or profile name, but must not include `agentsDir`, full paths, prompts, frontmatter text, parser internals, or raw exception messages.
+
+- [ ] **Step 5: Preserve the compatibility interface and reserve generic**
+
+Implement a private merge helper for reuse by Task 3:
+
+```ts
+function mergeProfiles(
+  user: DirectoryDiscoveryResult | undefined,
+  project: DirectoryDiscoveryResult | undefined,
+): DiscoverAgentsResult
+```
+
+It starts an insertion-ordered map with `GENERIC_AGENT`, rejects any loaded profile named `generic` with a bounded reserved-name diagnostic, then adds user profiles. Keep:
+
+```ts
+export const discoverAgents = async (agentsDir: string): Promise<DiscoverAgentsResult> =>
+  mergeProfiles(await discoverProfileDirectory(agentsDir, "user"), undefined);
+
+export const discoverDefaultAgents = (): Promise<DiscoverAgentsResult> =>
+  discoverAgents(join(getAgentDir(), "agents"));
+```
+
+- [ ] **Step 6: Run loader, integration, and type checks**
+
+Run:
+
+```bash
+npx tsx --test --test-name-pattern='agents|reserved|duplicate|malformed|missing|diagnostic' test/config-agents.test.ts
+npx tsx --test test/integration.test.ts
+npm run typecheck
+```
+
+Expected: selected unit tests pass; real-Pi integration tests remain skipped unless explicitly enabled; type checking passes.
+
+- [ ] **Step 7: Commit the directory loader**
+
+```bash
+git add src/agents.ts test/config-agents.test.ts
+git commit -m "refactor: deepen agent directory loading"
+```
+
+---
+
+### Task 3: Add nearest-project discovery and scoped merging
+
+**Files:**
+
+- Modify: `src/agents.ts`
+- Test: `test/config-agents.test.ts:150-240`
+
+**Interfaces:**
+
+- Consumes: the private loader and merge helper from Task 2 plus `AgentScope` from Task 1.
+- Produces: the small external discovery seam `DiscoverScopedAgentsOptions` and `discoverScopedAgents(options)`.
+- Keeps internal: `findNearestProjectAgentsDir(startCwd)`; nearest-walk behavior is tested through `discoverScopedAgents`.
+
+- [ ] **Step 1: Write failing scoped-discovery tests**
+
+Create this test tree:
+
+```text
+<root>/user-agents/a-user.md                       name: reviewer, description: User reviewer
+<root>/user-agents/b-user-helper.md                name: user-helper
+<root>/.pi/agents/root.md                          name: root-agent
+<root>/packages/app/.pi/agents/a-project.md        name: reviewer, description: Project reviewer
+<root>/packages/app/.pi/agents/b-project-helper.md name: project-helper
+<root>/packages/app/src/                           parent cwd
+```
+
+Add separate `user`, `project`, and `both` tests. Assert that `generic` is first; each single-source scope excludes the other source; nearest project lookup selects `packages/app/.pi/agents/` rather than the root project directory; and `both` includes both unique profiles while selecting the project `reviewer` without a duplicate warning:
+
+```ts
 const both = await discoverScopedAgents({
   agentScope: "both",
   userAgentsDir,
@@ -220,28 +308,31 @@ assert.equal(both.agents.some((entry) => entry.name === "project-helper"), true)
 assert.equal(both.diagnostics.some((entry) => /duplicate.*reviewer/i.test(entry)), false);
 ```
 
-The `project` assertion must prove nearest lookup chooses `packages/app/.pi/agents/`, not the root `.pi/agents/`. Also add tests for:
+Also test missing project directories, a reserved project `generic`, malformed project files, and `source: "project"` on returned project profiles. The real project `filePath` may exist only in the private `AgentProfile`.
 
-- Missing user and project directories return only `generic` with no diagnostics.
-- A profile named `generic` in either source never replaces the built-in and emits a reserved-name diagnostic.
-- Duplicate files inside one source keep alphabetically first content and emit one duplicate diagnostic.
-- Malformed files do not stop valid later files.
-- More than 20 malformed or duplicate files produce at most 20 finding records plus one omission record, with every record at most 512 UTF-8 bytes.
-- Returned project profiles have `source: "project"` and their real private `filePath` only inside `AgentProfile`.
-
-- [ ] **Step 2: Run scoped discovery tests and confirm they fail**
+- [ ] **Step 2: Run scoped tests and confirm they fail**
 
 Run:
 
 ```bash
-npx tsx --test --test-name-pattern='scope|nearest|reserved|duplicate|malformed|missing' test/config-agents.test.ts
+npx tsx --test --test-name-pattern='scope|nearest|project|both' test/config-agents.test.ts
 ```
 
-Expected: `discoverScopedAgents` and `findNearestProjectAgentsDir` are missing, or project profiles are not discovered.
+Expected: `discoverScopedAgents` is missing or project profiles are not discovered.
 
-- [ ] **Step 3: Split directory loading from scoped merging**
+- [ ] **Step 3: Implement private nearest-ancestor lookup**
 
-In `src/agents.ts`, keep `GENERIC_AGENT` private and add:
+Add:
+
+```ts
+async function findNearestProjectAgentsDir(startCwd: string): Promise<string | undefined>
+```
+
+Use `resolve(startCwd)`, `dirname`, and `stat`. At each directory inspect `<current>/.pi/agents`; return the first entry for which `stat().isDirectory()` is true. Continue upward for `ENOENT` and `ENOTDIR`; stop when `dirname(current) === current`. Throw a generic discovery error for other filesystem failures so the scoped interface can emit a safe diagnostic without a path.
+
+- [ ] **Step 4: Implement scoped loading and precedence**
+
+Add:
 
 ```ts
 export interface DiscoverScopedAgentsOptions {
@@ -250,105 +341,25 @@ export interface DiscoverScopedAgentsOptions {
   parentCwd: string;
 }
 
-interface DirectoryDiscoveryResult {
-  agents: AgentProfile[];
-  diagnostics: string[];
-}
-```
-
-Refactor current file parsing into:
-
-```ts
-async function discoverProfileDirectory(
-  agentsDir: string,
-  source: Exclude<ProfileSource, "builtin">,
-): Promise<DirectoryDiscoveryResult>
-```
-
-This function must:
-
-1. Return empty arrays on `ENOENT`.
-2. Sort Markdown files by filename before reading.
-3. Assign `source` from the function argument, never from frontmatter.
-4. Keep the first same-source duplicate.
-5. Return public-safe diagnostics that identify the source and sanitized profile or filename only; do not include `agentsDir`, full paths, YAML text, prompt text, or raw exception messages.
-6. Bound diagnostics to at most 20 finding records and each record to at most 512 UTF-8 bytes, adding one omission record when more findings exist.
-
-Use a local helper so this private loader does not depend on public profile formatting:
-
-```ts
-const sanitizeDiagnosticText = (value: string): string =>
-  truncateUtf8(
-    value.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ").replace(/\s+/gu, " ").trim(),
-    512,
-  ).text.trim();
-```
-
-Store findings through one accumulator that stops retaining findings after 20 and counts the rest. At return time append `Omitted N additional profile diagnostics.` when the omitted count is nonzero.
-
-Preserve the old defense for user files whose frontmatter explicitly says `source: project`: skip them with a bounded diagnostic. Project-directory files may omit `source`; `.pi/agents/` is what makes them project profiles.
-
-- [ ] **Step 4: Implement nearest ancestor lookup**
-
-Add:
-
-```ts
-async function findNearestProjectAgentsDir(startCwd: string): Promise<string | undefined>
-```
-
-Use `resolve(startCwd)`, `dirname`, and `stat`. At each directory, inspect `<current>/.pi/agents`; return the first entry for which `stat().isDirectory()` is true. Continue upward for `ENOENT` and `ENOTDIR`; stop when `dirname(current) === current`. Throw a generic discovery error for other filesystem failures so the scoped layer can emit a safe diagnostic without exposing a path.
-
-- [ ] **Step 5: Implement merge precedence and compatibility wrapper**
-
-Add:
-
-```ts
 export async function discoverScopedAgents(
   options: DiscoverScopedAgentsOptions,
 ): Promise<DiscoverAgentsResult>
 ```
 
-Add this helper and use it from both public discovery functions:
+Load user profiles for `user` or `both`, and only the nearest project directory for `project` or `both`. Extend Task 2's `mergeProfiles` so project profiles replace same-named user profiles through `Map.set()` without a duplicate diagnostic, while unique project profiles append in alphabetical order. Keep `generic` reserved for both sources and append diagnostics in user-then-project order.
 
-```ts
-function mergeProfiles(
-  user: DirectoryDiscoveryResult | undefined,
-  project: DirectoryDiscoveryResult | undefined,
-): DiscoverAgentsResult
-```
-
-Build an insertion-ordered map starting with `generic`. Load user profiles for `user` or `both`. Load the nearest project profiles for `project` or `both`. During each merge:
-
-- Reject `generic` and emit a bounded reserved-name diagnostic.
-- Add user profiles in alphabetical discovery order.
-- For project profiles, `Map.set()` replaces a same-named user profile without a diagnostic and preserves its existing list position.
-- Append source diagnostics in user-then-project order.
-
-Keep:
-
-```ts
-export const discoverAgents = async (agentsDir: string): Promise<DiscoverAgentsResult> =>
-  mergeProfiles(await discoverProfileDirectory(agentsDir, "user"), undefined);
-
-export const discoverDefaultAgents = (): Promise<DiscoverAgentsResult> =>
-  discoverAgents(join(getAgentDir(), "agents"));
-```
-
-The compatibility wrapper remains user-only and built-in-first.
-
-- [ ] **Step 6: Run discovery and integration tests**
+- [ ] **Step 5: Run scoped discovery and type checks**
 
 Run:
 
 ```bash
-npx tsx --test --test-name-pattern='agents|scope|nearest|reserved|duplicate|malformed|missing' test/config-agents.test.ts
-npx tsx --test test/integration.test.ts
+npx tsx --test test/config-agents.test.ts
 npm run typecheck
 ```
 
-Expected: selected unit tests pass; real-Pi integration tests remain skipped unless explicitly enabled; type checking passes.
+Expected: all configuration and discovery tests pass; TypeScript reports no errors.
 
-- [ ] **Step 7: Commit scoped discovery**
+- [ ] **Step 6: Commit scoped merging**
 
 ```bash
 git add src/agents.ts test/config-agents.test.ts
@@ -357,7 +368,7 @@ git commit -m "feat: discover scoped agent profiles"
 
 ---
 
-### Task 3: Make public discovery source-aware and scope-aware
+### Task 4: Make public discovery source-aware and scope-aware
 
 **Files:**
 
@@ -366,7 +377,7 @@ git commit -m "feat: discover scoped agent profiles"
 
 **Interfaces:**
 
-- Consumes: `AgentScope`, `AgentProfile.source: ProfileSource`, and bounded discovery diagnostics from Task 2.
+- Consumes: `AgentScope`, `AgentProfile.source: ProfileSource`, and bounded discovery diagnostics from Tasks 2-3.
 - Produces: `PublicAgentProfile.source: ProfileSource`, `formatUnknownProfileDiagnostic(name, profiles, scope)`, and `buildPublicAgentDiscovery(profiles, diagnostics)` with one 50 KiB budget.
 
 - [ ] **Step 1: Write failing public-output tests**
@@ -412,7 +423,7 @@ Expected: the project source is rejected by the old union or unknown diagnostics
 In `src/profile-discovery.ts`:
 
 - Use `ProfileSource` for `PublicAgentProfile.source`.
-- Add `scope: AgentScope` to `formatUnknownProfileDiagnostic`.
+- Add `scope: AgentScope = "user"` to `formatUnknownProfileDiagnostic` so existing user-only callers remain valid until Task 5 passes scope explicitly.
 - Add `diagnostics: string[]` to `PublicAgentDiscovery`.
 - Change `buildPublicAgentDiscovery` to accept `diagnostics: readonly string[] = []`.
 - Sanitize each diagnostic to 512 UTF-8 bytes, keep at most 20, and render them under `Discovery diagnostics:`.
@@ -445,128 +456,219 @@ git commit -m "feat: expose scoped profile sources safely"
 
 ---
 
-### Task 4: Add tool scope inputs and atomic project confirmation
+### Task 5: Add scoped profile listing and shared tool discovery
 
 **Files:**
 
 - Modify: `src/tools.ts:1-142,332-391`
-- Test: `test/tools.test.ts:1-260,660-780`
+- Modify: `src/index.ts:1-72`
+- Test: `test/tools.test.ts:1-140,660-880`
 
 **Interfaces:**
 
-- Consumes: `AGENT_SCOPES`, `AgentScope`, `DiscoverAgentsResult`, and scope-aware unknown diagnostics.
+- Consumes: `AGENT_SCOPES`, `AgentScope`, `DiscoverAgentsResult`, and bounded public discovery from Tasks 3-4.
 - Changes: `ToolServices.getProfiles()` to `ToolServices.discoverProfiles(scope, parentCwd)`.
-- Produces: `ToolServices.confirmProjectAgents(profiles, ctx)` using the existing `WriteConfirmation` result union.
-- Changes: `listAgents(input, services, ctx)` and preserves `startJobs(input, services, ctx)`.
+- Changes: `ExtensionDependencies.discoverProfiles` to accept `DiscoverScopedAgentsOptions` and default to `discoverScopedAgents`.
+- Changes: `listAgents(input, services, ctx)`; `startJobs` uses the same discovery interface with fixed `user` scope until Task 6 safely adds start scope.
 
-- [ ] **Step 1: Write failing schema and default-scope tests**
+- [ ] **Step 1: Write failing listing-scope tests**
 
-Update the schema test to require the same optional field on both top-level schemas:
+Update the agents schema test:
 
 ```ts
-const startScope = (StartParams as any).properties.agentScope;
 const agentsScope = (AgentsParams as any).properties.agentScope;
-assert.deepEqual(startScope.enum, ["user", "project", "both"]);
 assert.deepEqual(agentsScope.enum, ["user", "project", "both"]);
-assert.equal(startScope.default, "user");
 assert.equal(agentsScope.default, "user");
-assert.equal(Check(StartParams, { tasks: [{ task: "x" }], agentScope: "task" }), false);
+assert.equal(Check(AgentsParams, { agentScope: "task" }), false);
 ```
 
-Change the test adapter helper to record `(scope, parentCwd)` calls. Update every existing direct `listAgents` call to `listAgents({}, services, context)`, and update old unknown-profile expected text to include `user scope`. Add tests proving:
+Change the test adapter helper to record `(scope, parentCwd)` calls. Update every existing direct `listAgents` call to `listAgents({}, services, context)`, and update existing unknown-profile expectations to include `user scope`. Add tests proving:
 
-- `listAgents({}...)` and `startJobs({ tasks: [...] }...)` request `user`.
+- `listAgents({}...)` requests `user`.
 - Explicit `project` and `both` are forwarded.
+- `startJobs({ tasks: [...] }...)` still requests `user` from the same discovery interface.
 - A task `cwd: "/task-cwd"` does not affect discovery; `ctx.cwd` is forwarded instead.
-- Safe discovery diagnostics appear in model-visible content and `details.diagnostics`; test strings resembling prompts and full paths never appear.
+- Safe discovery diagnostics appear in model-visible content and `details.diagnostics`; prompt-like strings and full paths never appear.
+- A registered `subagent_agents({ agentScope: "both" })` call forwards `{ agentScope: "both", userAgentsDir: "/pi-agent/agents", parentCwd: "/workspace" }` to the injected runtime discovery adapter.
+- Existing runtime tests no longer expect profile discovery during `session_start`; a safe profile diagnostic is returned by the later tool call instead of sent as a startup notification.
 
-- [ ] **Step 2: Write failing project-confirmation tests**
-
-Add tests with a profile map containing `generic`, one user profile, and two project profiles. Assert:
-
-1. User-only selected profiles never call `confirmProjectAgents`.
-2. A mixed batch calls it exactly once with unique selected project profiles after name resolution.
-3. Approval enqueues the complete batch.
-4. Decline returns `Project agent profiles were declined.` and enqueues nothing.
-5. Unavailable or an invalid confirmation result returns `Project agent confirmation requires interactive UI.` and enqueues nothing.
-6. In `both`, an overridden profile with final `source: "project"` requires confirmation.
-7. Project confirmation and writable confirmation are separate calls; if project confirmation rejects, writable confirmation is not shown.
-
-- [ ] **Step 3: Run tool tests and confirm they fail**
+- [ ] **Step 2: Run listing tests and confirm they fail**
 
 Run:
 
 ```bash
-npx tsx --test --test-name-pattern='scope|project agent|registered tools' test/tools.test.ts
+npx tsx --test --test-name-pattern='listAgents|agents schema|default.*scope|discovery diagnostic' test/tools.test.ts
 ```
 
-Expected: schemas lack `agentScope`, the tool adapter uses the old getter, or project confirmation is absent.
+Expected: `AgentsParams` lacks `agentScope` or the tool adapter still exposes a static profile map.
 
-- [ ] **Step 4: Add tool schemas and the scoped discovery interface**
+- [ ] **Step 3: Add the agents scope schema and shared discovery interface**
 
 In `src/tools.ts`, add:
 
 ```ts
 const AgentScopeSchema = Type.Optional(StringEnum(AGENT_SCOPES, { default: "user" }));
 
-export const StartParams = Type.Object({
-  agentScope: AgentScopeSchema,
-  tasks: Type.Array(StartTask, { minItems: 1, maxItems: 8 }),
-}, { additionalProperties: false });
-
 export const AgentsParams = Type.Object({
   agentScope: AgentScopeSchema,
 }, { additionalProperties: false });
 ```
 
-Change `ToolServices` to:
+Change `ToolServices` from `getProfiles()` to:
 
 ```ts
 discoverProfiles(scope: AgentScope, parentCwd: string): Promise<DiscoverAgentsResult>;
+```
+
+Change `ExtensionDependencies.discoverProfiles` to `(options: DiscoverScopedAgentsOptions) => Promise<DiscoverAgentsResult>` and default it to `discoverScopedAgents`. Keep `StartParams` user-only in this task. Change `startJobs` to call `discoverProfiles("user", ctx.cwd)`, preserving current launch behavior while moving both tools onto one discovery seam.
+
+- [ ] **Step 4: Implement scoped public listing and runtime discovery**
+
+Add:
+
+```ts
+const requestedScope = (scope: AgentScope | undefined): AgentScope => scope ?? "user";
+```
+
+`listAgents(input, services, ctx)` calls `discoverProfiles(requestedScope(input.agentScope), ctx.cwd)`, passes both profiles and diagnostics to `buildPublicAgentDiscovery`, and returns the builder's sanitized bounded diagnostics in `details.diagnostics`. Keep content plus serialized details within the shared 50 KiB budget.
+
+In `src/index.ts`, remove the session-wide profile map and provide:
+
+```ts
+discoverProfiles: (agentScope, parentCwd) => discoverProfiles({
+  agentScope,
+  userAgentsDir: join(resolveAgentDir(), "agents"),
+  parentCwd,
+}),
+```
+
+During `session_start`, load only `simple-subagents.json`. Discovery diagnostics now belong to the requesting tool call, not startup notifications.
+
+- [ ] **Step 5: Pass listing input and context through registration**
+
+Change the registered callback to:
+
+```ts
+execute: async (_id, input, _signal, _update, ctx) => listAgents(input, services, ctx),
+```
+
+Update the `subagent_agents` description to mention `user`, `project`, and `both`, with `user` as the default.
+
+- [ ] **Step 6: Run tool tests and type checking**
+
+Run:
+
+```bash
+npx tsx --test test/tools.test.ts
+npm run typecheck
+```
+
+Expected: all tool tests pass, starts remain user-only, and type checking passes.
+
+- [ ] **Step 7: Commit scoped listing**
+
+```bash
+git add src/tools.ts src/index.ts test/tools.test.ts
+git commit -m "feat: list scoped agent profiles"
+```
+
+---
+
+### Task 6: Add start scope and atomic project confirmation
+
+**Files:**
+
+- Modify: `src/tools.ts:20-142,332-360`
+- Modify: `src/index.ts:20-50`
+- Test: `test/tools.test.ts:100-280,700-790`
+
+**Interfaces:**
+
+- Consumes: `AgentScopeSchema`, `requestedScope`, and `ToolServices.discoverProfiles` from Task 5.
+- Produces: `ToolServices.confirmProjectAgents(profiles, ctx)` using the existing `WriteConfirmation` result union.
+- Changes: `StartParams` and `startJobs` to support one scope for the complete batch.
+
+- [ ] **Step 1: Write failing start-scope and confirmation tests**
+
+Require the start schema to expose the same scope values:
+
+```ts
+const startScope = (StartParams as any).properties.agentScope;
+assert.deepEqual(startScope.enum, ["user", "project", "both"]);
+assert.equal(startScope.default, "user");
+assert.equal(Check(StartParams, { tasks: [{ task: "x" }], agentScope: "task" }), false);
+```
+
+Add `confirmProjectAgents: async () => "approved"` to the default test adapter so existing user-only tests still satisfy `ToolServices`. Add tests with `generic`, one user profile, and two project profiles. Assert:
+
+1. Omitted scope requests `user`; explicit `project` and `both` are forwarded with `ctx.cwd`.
+2. User-only selected profiles never call `confirmProjectAgents`.
+3. A mixed batch calls it exactly once with unique selected project profiles after resolution.
+4. Approval enqueues the complete batch.
+5. Decline returns `Project agent profiles were declined.` and enqueues nothing.
+6. Unavailable or invalid confirmation returns `Project agent confirmation requires interactive UI.` and enqueues nothing.
+7. An overridden `both` profile whose final source is `project` requires confirmation.
+8. Project and writable confirmation are separate; project rejection prevents writable confirmation.
+9. Scope-aware unknown diagnostics name the searched scope and remain first in `details.diagnostics`.
+
+- [ ] **Step 2: Run start tests and confirm they fail**
+
+Run:
+
+```bash
+npx tsx --test --test-name-pattern='start.*scope|project agent|unknown profile|registered tools' test/tools.test.ts
+```
+
+Expected: `StartParams` lacks `agentScope` or project confirmation is absent.
+
+- [ ] **Step 3: Add start scope and confirmation interface**
+
+Change `StartParams` to:
+
+```ts
+export const StartParams = Type.Object({
+  agentScope: AgentScopeSchema,
+  tasks: Type.Array(StartTask, { minItems: 1, maxItems: 8 }),
+}, { additionalProperties: false });
+```
+
+Add to `ToolServices`:
+
+```ts
 confirmProjectAgents(
   profiles: readonly AgentProfile[],
   ctx: ExtensionContext,
 ): Promise<WriteConfirmation>;
 ```
 
-Keep `confirmWritable` unchanged.
-
-- [ ] **Step 5: Use one resolution path for listing and launching**
-
-Implement:
+Keep `confirmWritable` unchanged. Add a temporary fail-closed runtime adapter in `src/index.ts`:
 
 ```ts
-const requestedScope = (scope: AgentScope | undefined): AgentScope => scope ?? "user";
+confirmProjectAgents: async () => "unavailable",
 ```
 
-`listAgents(input, services, ctx)` must call `services.discoverProfiles(requestedScope(input.agentScope), ctx.cwd)`, pass both discovered profiles and diagnostics to `buildPublicAgentDiscovery`, and return that builder's sanitized bounded diagnostics in `details.diagnostics`. This keeps content plus serialized details within the shared 50 KiB budget.
+Task 7 replaces this safe default with user configuration and interactive confirmation. Until then, runtime project launches are rejected rather than launched without trust approval.
+
+- [ ] **Step 4: Resolve and confirm the complete batch atomically**
 
 `startJobs` must:
 
-1. Resolve scope once.
+1. Resolve scope once with `requestedScope`.
 2. Call `discoverProfiles(scope, ctx.cwd)` before validating names.
-3. Build the profile map from that result.
-4. Include scope in unknown-profile diagnostics.
-5. Resolve all requested profiles before confirmation.
-6. Deduplicate selected project profiles by name.
-7. Confirm project profiles once before writable confirmation.
-8. Reject atomically on any non-approved project result.
-9. Preserve bounded discovery diagnostics in both model-visible `content` and `details.diagnostics` without exposing paths or prompts. Append them under `Discovery diagnostics:` after the primary start or rejection message. For an unknown profile, keep the scope-aware unknown diagnostic first in `details.diagnostics`, followed by discovery diagnostics.
-10. Enqueue only after both required confirmations approve.
+3. Build the profile map and include scope in unknown-profile diagnostics.
+4. Resolve every requested profile before confirmation.
+5. Deduplicate selected project profiles by name.
+6. Confirm project profiles once before writable confirmation.
+7. Reject the complete batch on any non-approved project result.
+8. Enqueue only after both required confirmations approve.
 
-Keep the two exact project rejection messages from Step 2.
+Preserve bounded discovery diagnostics in model-visible `content` and `details.diagnostics`. Append them under `Discovery diagnostics:` after the primary message. For an unknown profile, keep the scope-aware unknown diagnostic first, followed by discovery diagnostics. Keep the exact rejection messages from Step 1.
 
-- [ ] **Step 6: Pass tool input and context through registration**
+- [ ] **Step 5: Update registered start guidance**
 
-Change the registered `subagent_agents` execution callback to:
+Update the `subagent_start` description to say scope applies to the complete batch. Do not change background lifecycle guidance.
 
-```ts
-execute: async (_id, input, _signal, _update, ctx) => listAgents(input, services, ctx),
-```
-
-Update its description to mention `user`, `project`, and `both`, with `user` as the default. Update `subagent_start` description only enough to explain that scope applies to the complete batch; do not change background lifecycle guidance.
-
-- [ ] **Step 7: Run the complete tool test file and type checking**
+- [ ] **Step 6: Run tool tests and type checking**
 
 Run:
 
@@ -577,70 +679,52 @@ npm run typecheck
 
 Expected: all tool tests and type checks pass.
 
-- [ ] **Step 8: Commit scoped tool behavior**
+- [ ] **Step 7: Commit safe scoped launching**
 
 ```bash
-git add src/tools.ts test/tools.test.ts
-git commit -m "feat: add scoped profile tool inputs"
+git add src/tools.ts src/index.ts test/tools.test.ts
+git commit -m "feat: confirm scoped project launches"
 ```
 
 ---
 
-### Task 5: Wire runtime discovery and project confirmation
+### Task 7: Enable configured runtime project confirmation
 
 **Files:**
 
-- Modify: `src/index.ts:1-72`
-- Test: `test/tools.test.ts:780-980`
+- Modify: `src/index.ts:20-55`
+- Test: `test/tools.test.ts:800-1000`
 
 **Interfaces:**
 
-- Consumes: `discoverScopedAgents(options)` from Task 2 and scoped `ToolServices` from Task 4.
-- Changes: `ExtensionDependencies.discoverProfiles` to accept `DiscoverScopedAgentsOptions`.
-- Produces: Runtime adapters for `discoverProfiles`, `confirmProjectAgents`, and the unchanged writable/default interfaces.
+- Consumes: `SimpleSubagentsConfig.confirmProjectAgents` from Task 1 and the fail-closed confirmation adapter from Task 6.
+- Produces: The runtime UI/config adapter for `ToolServices.confirmProjectAgents`.
 
-- [ ] **Step 1: Write failing runtime tests**
-
-Update runtime dependency stubs to accept discovery options and config objects to include `confirmProjectAgents`. Add tests asserting:
-
-```ts
-assert.deepEqual(discoveryCalls, [
-  {
-    agentScope: "both",
-    userAgentsDir: "/pi-agent/agents",
-    parentCwd: "/workspace",
-  },
-]);
-```
+- [ ] **Step 1: Write failing runtime confirmation tests**
 
 Add runtime tests for:
 
-- Project confirmation enabled + approval starts the batch and records one confirmation.
-- Project confirmation enabled + `hasUI: false` rejects the batch.
-- Project confirmation enabled + user-only profile starts without confirmation.
+- Enabled confirmation + approval starts a project batch and records one confirmation.
+- Enabled confirmation + rejection starts no jobs.
+- Enabled confirmation + `hasUI: false` rejects the complete batch.
+- A user-only profile starts without project confirmation.
 - `confirmProjectAgents: false` starts a project profile without UI for trusted automation.
 - A mixed writable/project batch records two separate confirmations after approval.
-- Project discovery diagnostics are returned by the tool call and are not sent as startup notifications.
+- Confirmation text reports the number of unique project profiles without exposing prompts or paths.
 
 - [ ] **Step 2: Run runtime tests and confirm they fail**
 
 Run:
 
 ```bash
-npx tsx --test --test-name-pattern='runtime.*(project|scope|config|profiles)' test/tools.test.ts
+npx tsx --test --test-name-pattern='runtime.*project|trusted automation|separate confirmations' test/tools.test.ts
 ```
 
-Expected: runtime still loads one static session profile map and has no project confirmation adapter.
+Expected: the Task 6 fail-closed adapter rejects project launches even when UI approval or the trusted-automation setting should permit them.
 
-- [ ] **Step 3: Replace session profile caching with the shared resolver**
+- [ ] **Step 3: Replace the fail-closed adapter with configured UI confirmation**
 
-In `src/index.ts`:
-
-- Import `discoverScopedAgents` and `DiscoverScopedAgentsOptions`.
-- Change `ExtensionDependencies.discoverProfiles` to `(options: DiscoverScopedAgentsOptions) => Promise<DiscoverAgentsResult>`.
-- Default to `discoverScopedAgents`.
-- Remove the mutable session-wide `profiles` map.
-- Initialize config as:
+Initialize runtime config as:
 
 ```ts
 let config: SimpleSubagentsConfig = {
@@ -649,21 +733,7 @@ let config: SimpleSubagentsConfig = {
 };
 ```
 
-Provide this adapter:
-
-```ts
-discoverProfiles: (agentScope, parentCwd) => discoverProfiles({
-  agentScope,
-  userAgentsDir: join(resolveAgentDir(), "agents"),
-  parentCwd,
-}),
-```
-
-During `session_start`, load only `simple-subagents.json`. Profile discovery occurs in `subagent_agents` or `subagent_start`, so each call uses its scope and current parent cwd. Do not notify private discovery diagnostics at session start.
-
-- [ ] **Step 4: Implement runtime project confirmation**
-
-Add:
+Replace Task 6's temporary adapter with:
 
 ```ts
 confirmProjectAgents: async (profiles, ctx) => {
@@ -676,9 +746,9 @@ confirmProjectAgents: async (profiles, ctx) => {
 },
 ```
 
-The count is unique selected profile names, not job count. Do not display prompts, file paths, or raw frontmatter in the confirmation.
+The count is unique selected profile names, not job count. Do not display prompts, paths, raw frontmatter, or task text.
 
-- [ ] **Step 5: Run runtime, tool, and type checks**
+- [ ] **Step 4: Run runtime, tool, and type checks**
 
 Run:
 
@@ -689,7 +759,7 @@ npm run typecheck
 
 Expected: all runtime/tool tests and type checks pass.
 
-- [ ] **Step 6: Commit runtime wiring**
+- [ ] **Step 5: Commit runtime confirmation**
 
 ```bash
 git add src/index.ts test/tools.test.ts
@@ -698,7 +768,7 @@ git commit -m "feat: confirm project agent profiles"
 
 ---
 
-### Task 6: Document project profile use and security
+### Task 8: Document project profile use and security
 
 **Files:**
 
@@ -707,7 +777,7 @@ git commit -m "feat: confirm project agent profiles"
 
 **Interfaces:**
 
-- Consumes: Final schemas, defaults, precedence, and confirmation text from Tasks 1-5.
+- Consumes: Final schemas, defaults, precedence, and confirmation text from Tasks 1-7.
 - Produces: User-facing documentation for all new behavior.
 
 - [ ] **Step 1: Add a failing README contract test**
@@ -803,7 +873,7 @@ git commit -m "docs: explain project agent scopes"
 
 ---
 
-### Task 7: Final regression and security verification
+### Task 9: Final regression and security verification
 
 **Files:**
 
