@@ -323,7 +323,7 @@ const renderToolResult = (result: ToolResponse, expanded: boolean, theme: { fg(c
   if (!expanded) return theme.fg("muted", compact);
 
   const detail = operation === "collect" || diagnostics.length > 0 ? content
-    : operation === "start" ? jobs.map(launchDetail).join("\n")
+    : operation === "start" || operation === "cancel" || operation === "discard" ? jobs.map(launchDetail).join("\n")
       : "";
   return theme.fg("muted", [compact, detail].filter(Boolean).join("\n\n"));
 };

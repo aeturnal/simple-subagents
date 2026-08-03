@@ -615,6 +615,52 @@ test("tool renderers preserve task detail when expanded and keep compact control
   assert.match(compactDiscard, /⌫ job-2 discarded/);
 });
 
+test("expanded cancel rendering includes profile-selected launch thinking only outside compact output", async () => {
+  const pi = new FakePi();
+  const { services } = createServices(undefined, {
+    getProfiles: async () => new Map([
+      ["generic", { ...profile, name: "generic", source: "builtin" as const }],
+      ["reviewer", { ...profile, thinking: "medium" as const }],
+    ]),
+  });
+  registerSubagentTools(pi as never, services);
+  const theme = { fg: (_color: string, value: string) => value };
+  const render = (result: unknown, expanded: boolean): string =>
+    pi.tools.get("subagent_control")?.renderResult(result, { expanded }, theme).render(160).join("\n") ?? "";
+
+  await startJobs({ tasks: [{ task: "cancel profile thinking", agent: "reviewer" }] }, services, {} as never);
+  const cancelled = await controlJobs({ action: "cancel", ids: ["job-1"] }, services);
+
+  assert.deepEqual(cancelled.details.diagnostics, []);
+  assert.doesNotMatch(render(cancelled, false), /Launch model|Launch thinking|cancel profile thinking/);
+  assert.match(render(cancelled, true), / {2}cancel profile thinking/);
+  assert.match(render(cancelled, true), /Launch thinking: medium \(profile\)/);
+});
+
+test("expanded discard rendering includes profile-selected launch thinking only outside compact output", async () => {
+  const pi = new FakePi();
+  const { services, runner } = createServices(undefined, {
+    getProfiles: async () => new Map([
+      ["generic", { ...profile, name: "generic", source: "builtin" as const }],
+      ["reviewer", { ...profile, thinking: "medium" as const }],
+    ]),
+  });
+  registerSubagentTools(pi as never, services);
+  const theme = { fg: (_color: string, value: string) => value };
+  const render = (result: unknown, expanded: boolean): string =>
+    pi.tools.get("subagent_control")?.renderResult(result, { expanded }, theme).render(160).join("\n") ?? "";
+
+  await startJobs({ tasks: [{ task: "discard profile thinking", agent: "reviewer" }] }, services, {} as never);
+  runner.started[0]?.resolve(completed());
+  await runner.flush();
+  const discarded = await controlJobs({ action: "discard", ids: ["job-1"] }, services);
+
+  assert.deepEqual(discarded.details.diagnostics, []);
+  assert.doesNotMatch(render(discarded, false), /Launch model|Launch thinking|discard profile thinking/);
+  assert.match(render(discarded, true), / {2}discard profile thinking/);
+  assert.match(render(discarded, true), /Launch thinking: medium \(profile\)/);
+});
+
 test("registered subagent_wait forwards the parent tool signal without cancelling jobs", async () => {
   const pi = new FakePi();
   const { services, runner } = createServices();
