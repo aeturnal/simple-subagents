@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { JobManager, type WaitJobStatus, type WaitResult, type WaitUntil } from "./job-manager.js";
+import { decideJobControl } from "./job-lifecycle.js";
 import { formatJobStatusList, formatSingleJobStatus, projectJobStatus, selectStatusList, type JobStatus } from "./job-status.js";
 import { capCollectedPayload, formatCollectedResult } from "./output.js";
 import { buildPublicAgentDiscovery, formatUnknownProfileDiagnostic, type PublicAgentProfile } from "./profile-discovery.js";
@@ -209,16 +210,9 @@ export async function controlJobs(input: ControlInput, services: ToolServices): 
       diagnostics.push(`Unknown job: ${id}`);
       continue;
     }
-    if (input.action === "cancel" && !["queued", "running", "cancelled"].includes(job.state)) {
-      diagnostics.push(`Cannot cancel job in ${job.state} state`);
-      continue;
-    }
-    if (input.action === "collect" && !["completed", "failed", "cancelled", "collected"].includes(job.state)) {
-      diagnostics.push(`Cannot collect job in ${job.state} state`);
-      continue;
-    }
-    if (input.action === "discard" && !["completed", "failed", "cancelled", "discarded"].includes(job.state)) {
-      diagnostics.push(`Cannot discard job in ${job.state} state`);
+    const decision = decideJobControl(job.state, input.action);
+    if (decision.kind === "invalid") {
+      diagnostics.push(decision.message);
       continue;
     }
 

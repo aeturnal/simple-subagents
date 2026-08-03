@@ -1,6 +1,7 @@
 import { resolveLaunchOptions, type LaunchDefaults, type LaunchOptions } from "./launch-options.js";
 import type { ProcessResult, ProcessRunner, RunningProcess } from "./process-runner.js";
 import { CAPTURED_TEXT_MAX_BYTES, MALFORMED_EVENT_SAMPLE_MAX_BYTES, truncateUtf8 } from "./output.js";
+import { decideJobControl, inspectJobState } from "./job-lifecycle.js";
 import { isSettled, type AgentProfile, type Job, type JobRequest, type JobState, type ProgressItem, type UsageStats } from "./types.js";
 
 const MAX_CONCURRENCY = 4;
@@ -147,7 +148,7 @@ export class JobManager {
 
   async cancel(id: string): Promise<Job> {
     const entry = this.requireJob(id);
-    if (this.isTerminal(entry.job.state)) return this.snapshot(entry.job);
+    if (inspectJobState(entry.job.state).settled) return this.snapshot(entry.job);
     if (entry.cancellation) {
       await entry.cancellation;
       return this.snapshot(entry.job);
@@ -169,20 +170,22 @@ export class JobManager {
 
   collect(id: string): Job {
     const entry = this.requireJob(id);
-    if (entry.job.state === "collected") return this.snapshot(entry.job);
-    if (!this.isInboxState(entry.job.state)) throw new Error(`Cannot collect job in ${entry.job.state} state`);
+    const decision = decideJobControl(entry.job.state, "collect");
+    if (decision.kind === "invalid") throw new Error(decision.message);
+    if (decision.kind === "already-applied") return this.snapshot(entry.job);
 
-    entry.job.state = "collected";
+    entry.job.state = decision.nextState;
     this.notify();
     return this.snapshot(entry.job);
   }
 
   discard(id: string): Job {
     const entry = this.requireJob(id);
-    if (entry.job.state === "discarded") return this.snapshot(entry.job);
-    if (!this.isInboxState(entry.job.state)) throw new Error(`Cannot discard job in ${entry.job.state} state`);
+    const decision = decideJobControl(entry.job.state, "discard");
+    if (decision.kind === "invalid") throw new Error(decision.message);
+    if (decision.kind === "already-applied") return this.snapshot(entry.job);
 
-    entry.job.state = "discarded";
+    entry.job.state = decision.nextState;
     this.notify();
     return this.snapshot(entry.job);
   }
@@ -481,14 +484,6 @@ export class JobManager {
     const entry = this.jobs.get(id);
     if (!entry) throw new Error(`Unknown job: ${id}`);
     return entry;
-  }
-
-  private isInboxState(state: JobState): state is "completed" | "failed" | "cancelled" {
-    return state === "completed" || state === "failed" || state === "cancelled";
-  }
-
-  private isTerminal(state: JobState): boolean {
-    return state === "completed" || state === "failed" || state === "cancelled" || state === "collected" || state === "discarded";
   }
 
   private notify(): void {
