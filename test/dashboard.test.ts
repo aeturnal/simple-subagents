@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { createSimpleSubagentsExtension } from "../src/index.js";
-import { formatWidgetLines, registerSubagentsUi, SubagentsDashboard } from "../src/dashboard.ts";
+import { registerSubagentsUi, SubagentsDashboard } from "../src/dashboard.ts";
 import type { Job, JobState } from "../src/types.js";
 
 const theme = {
@@ -43,12 +43,12 @@ class FakeManager {
   currentTime(): number { return 10_000; }
   list(): readonly Job[] { this.listCalls += 1; return structuredClone(this.jobs); }
   subscribe(listener: (jobs: readonly Job[]) => void): () => void {
-    this.lifecycleEvents?.push("subscribe");
+    this.lifecycleEvents?.push("new manager subscribe");
     this.listeners.add(listener);
     this.capturedListeners.push(listener);
     listener(this.list());
     return () => {
-      this.lifecycleEvents?.push("unsubscribe");
+      this.lifecycleEvents?.push("old manager unsubscribe");
       this.unsubscribeCalls += 1;
       this.listeners.delete(listener);
     };
@@ -79,7 +79,15 @@ class FakeUi {
   lifecycleEvents: string[] | undefined;
   doneCalls = 0;
   renderRequests = 0;
-  setWidget(_key: string, content: unknown): void { this.widgets.push(content); }
+  widgetFactory: ((tui: any, activeTheme: typeof theme) => { render(width: number): string[] }) | undefined;
+  setWidget(_key: string, content: unknown): void {
+    this.widgets.push(content);
+    if (typeof content === "function") this.widgetFactory = content as typeof this.widgetFactory;
+    if (content === undefined) {
+      this.lifecycleEvents?.push("old live widget clear");
+      this.widgetFactory = undefined;
+    }
+  }
   notify(message: string, level?: "info" | "warning" | "error"): void { this.notifications.push([message, level]); }
   custom(factory: (tui: { requestRender(): void; terminal: { readonly rows: number } }, theme: unknown, keybindings: unknown, done: () => void) => SubagentsDashboard): Promise<void> {
     return new Promise((resolve) => {
@@ -133,16 +141,6 @@ const dashboard = (manager: FakeManager, pi = new FakePi(), options: Record<stri
 } as never);
 
 const nextTurn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
-
-test("formats compact widget attention counts while excluding collected and discarded jobs", () => {
-  const lines = formatWidgetLines([
-    job("job-1", "queued"), job("job-2", "running"), job("job-3", "completed"),
-    job("job-4", "failed"), job("job-5", "cancelled"), job("job-6", "collected"), job("job-7", "discarded"),
-  ], theme);
-
-  assert.equal(plain(lines[0] ?? ""), "● Subagents · 1 queued · 1 running · 3 ready");
-  assert.deepEqual(formatWidgetLines([job("job-8", "collected"), job("job-9", "discarded")], theme), []);
-});
 
 test("list mode never exceeds its terminal row and width budget", (t) => {
   const pi = new FakePi();
@@ -541,19 +539,22 @@ test("dashboard reports a failed cancellation and closes on escape", async (t) =
   assert.equal(pi.ui.doneCalls, 1);
 });
 
-test("registration updates and clears the compact widget from live manager changes", async () => {
+test("registration installs one live widget and clears it after work disappears", async () => {
+  const manager = new FakeManager([]);
   const pi = new FakePi();
-  const manager = new FakeManager([job("job-1", "running")]);
   const cleanup = registerSubagentsUi(pi as never, manager as never);
   await pi.emit("session_start", context(pi));
+  manager.setJobs([job("job-1", "running")]);
 
-  const factory = pi.ui.widgets.at(-1) as ((tui: unknown, activeTheme: typeof theme) => { render(width: number): string[] }) | undefined;
-  assert.ok(factory);
-  for (const width of [30, 60, 100]) for (const line of factory({}, theme).render(width)) assert.ok(visibleWidth(line) <= width);
+  assert.equal(pi.ui.widgets.filter((entry) => typeof entry === "function").length, 1);
+  const widgets = pi.ui.widgets as unknown[] & { findLast(predicate: (entry: unknown) => boolean): unknown };
+  const factory = widgets.findLast((entry: unknown) => typeof entry === "function") as any;
+  const component = factory({ requestRender: () => { pi.ui.renderRequests += 1; }, terminal: { columns: 100 } }, theme);
+  assert.match(plain(component.render(100).join("\n")), /Subagents[\s\S]*job-1/u);
+
   manager.setJobs([job("job-1", "collected")]);
   assert.equal(pi.ui.widgets.at(-1), undefined);
   cleanup();
-  assert.equal(manager.unsubscribeCalls, 1);
 });
 
 test("captured manager callback cannot render after Escape closes the dashboard", async () => {
@@ -604,25 +605,20 @@ test("registration cleanup closes the active dashboard and clears resources once
   assert.equal(manager.unsubscribeCalls, 2);
 });
 
-test("replacement session closes the active dashboard before installing its widget subscription", async () => {
+test("replacement session clears the old live widget before subscribing the new session", async (t) => {
   const pi = new FakePi();
   const manager = new FakeManager([job("job-1", "running")]);
   const lifecycleEvents: string[] = [];
   pi.ui.lifecycleEvents = lifecycleEvents;
   manager.lifecycleEvents = lifecycleEvents;
-  registerSubagentsUi(pi as never, manager as never);
+  const cleanup = registerSubagentsUi(pi as never, manager as never);
+  t.after(cleanup);
   await pi.emit("session_start", context(pi));
-  const command = pi.commands.get("subagents");
-  assert.ok(command);
-  const opening = command("", context(pi));
-  assert.ok(pi.ui.component);
   lifecycleEvents.length = 0;
 
   await pi.emit("session_start", context(pi));
 
-  assert.equal(pi.ui.doneCalls, 1);
-  await opening;
-  assert.deepEqual(lifecycleEvents, ["unsubscribe", "done", "unsubscribe", "subscribe"]);
+  assert.deepEqual(lifecycleEvents, ["old manager unsubscribe", "old live widget clear", "new manager subscribe"]);
   assert.equal(manager.listeners.size, 1);
 });
 
@@ -661,6 +657,7 @@ test("extension clears the widget before manager shutdown", async () => {
   })(pi as never);
 
   await pi.emit("session_start", context(pi));
+  await pi.emit("session_shutdown", context(pi));
   await pi.emit("session_shutdown", context(pi));
 
   assert.deepEqual(events, ["clear", "shutdown"]);

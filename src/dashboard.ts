@@ -1,25 +1,18 @@
 import { Buffer } from "node:buffer";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, type Component, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { boundedPreview, projectJobStatus, sanitizeTerminalText, type JobStatus } from "./job-status.js";
 import { decideJobControl, inspectJobState } from "./job-lifecycle.js";
 import { JobManager } from "./job-manager.js";
+import { LiveSubagentsWidget } from "./live-widget.js";
 import type { Job, JobState } from "./types.js";
 
 type DashboardTheme = { fg(color: "accent" | "dim" | "error" | "muted" | "success" | "warning", text: string): string; bold(text: string): string };
 
-type AttentionCounts = { queued: number; running: number; ready: number };
 type DashboardMode = "list" | "compact" | "full";
 type ReturnMode = Exclude<DashboardMode, "full">;
 type JobRecord = { kind: "job"; id: string; state: JobState; status: JobStatus; job: Job };
 type ListRecord = { kind: "heading"; label: string } | JobRecord;
-
-const attentionCounts = (jobs: readonly Job[]): AttentionCounts => jobs.reduce<AttentionCounts>((counts, job) => {
-  if (job.state === "queued") counts.queued += 1;
-  else if (job.state === "running") counts.running += 1;
-  else if (inspectJobState(job.state).inbox) counts.ready += 1;
-  return counts;
-}, { queued: 0, running: 0, ready: 0 });
 
 const textFingerprint = (text: string): string => {
   let hash = 2_166_136_261;
@@ -67,17 +60,6 @@ const stateText = (status: JobStatus): string => {
   const duration = status.state === "queued" ? status.queueDurationMs : status.runDurationMs ?? status.queueDurationMs;
   return `${status.state}${duration === undefined ? "" : ` ${durationText(duration)}`}`;
 };
-
-export function formatWidgetLines(jobs: readonly Job[], theme: DashboardTheme): string[] {
-  const counts = attentionCounts(jobs);
-  const parts = [
-    counts.queued > 0 ? `${counts.queued} queued` : "",
-    counts.running > 0 ? `${counts.running} running` : "",
-    counts.ready > 0 ? `${counts.ready} ready` : "",
-  ].filter(Boolean);
-  if (parts.length === 0) return [];
-  return [theme.fg("accent", "● Subagents") + theme.fg("dim", ` · ${parts.join(" · ")}`)];
-}
 
 export interface SubagentsDashboardOptions {
   jobs: readonly Job[];
@@ -362,7 +344,7 @@ export class SubagentsDashboard implements Component {
 }
 
 export function registerSubagentsUi(pi: ExtensionAPI, manager: JobManager): () => void {
-  let widgetContext: ExtensionContext | undefined;
+  let liveWidget: LiveSubagentsWidget | undefined;
   let removeWidgetSubscription: (() => void) | undefined;
   let activeDashboard: { close(): void } | undefined;
   let cleanedUp = false;
@@ -370,8 +352,8 @@ export function registerSubagentsUi(pi: ExtensionAPI, manager: JobManager): () =
   const clearWidget = (): void => {
     removeWidgetSubscription?.();
     removeWidgetSubscription = undefined;
-    if (widgetContext?.mode === "tui") widgetContext.ui.setWidget("simple-subagents", undefined);
-    widgetContext = undefined;
+    liveWidget?.dispose();
+    liveWidget = undefined;
   };
 
   pi.registerCommand("subagents", {
@@ -427,19 +409,12 @@ export function registerSubagentsUi(pi: ExtensionAPI, manager: JobManager): () =
     activeDashboard = undefined;
     clearWidget();
     if (cleanedUp || ctx.mode !== "tui") return;
-    widgetContext = ctx;
+    const widget = new LiveSubagentsWidget();
+    liveWidget = widget;
+    widget.setUi(ctx.ui);
     let widgetClosed = false;
     const unsubscribe = manager.subscribe((jobs) => {
-      if (widgetClosed) return;
-      const counts = attentionCounts(jobs);
-      if (counts.queued + counts.running + counts.ready === 0) {
-        ctx.ui.setWidget("simple-subagents", undefined);
-        return;
-      }
-      ctx.ui.setWidget("simple-subagents", (_tui, theme) => ({
-        render: (width) => formatWidgetLines(jobs, theme).map((line) => truncateToWidth(line, width)),
-        invalidate: () => {},
-      }));
+      if (!widgetClosed) widget.setJobs(jobs);
     });
     removeWidgetSubscription = () => {
       if (widgetClosed) return;
