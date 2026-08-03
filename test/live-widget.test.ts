@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { formatLiveWidgetLines } from "../src/live-widget.js";
+import { formatLiveWidgetLines, LiveSubagentsWidget } from "../src/live-widget.js";
 import type { Job, JobState } from "../src/types.js";
 
 const colorCodes: Record<string, number> = { accent: 35, dim: 2, error: 31, muted: 90, success: 32 };
@@ -137,4 +137,134 @@ test("uses singular stat labels and compact million tokens", () => {
     progress: [{ type: "tool", text: "Started read", timestamp: 3_000 }],
   })])[1] ?? "");
   assert.match(text, /↻1 · 1 tool use · 1\.2M tokens/);
+});
+
+class FakeClock {
+  now = 10_000;
+  nextId = 1;
+  intervals = new Map<number, { callback(): void; delay: number }>();
+  timeouts = new Map<number, { callback(): void; delay: number }>();
+  setInterval = (callback: () => void, delay: number): unknown => {
+    const id = this.nextId++;
+    this.intervals.set(id, { callback, delay });
+    return id;
+  };
+  clearInterval = (handle: unknown): void => { this.intervals.delete(handle as number); };
+  setTimeout = (callback: () => void, delay: number): unknown => {
+    const id = this.nextId++;
+    this.timeouts.set(id, {
+      callback: () => { this.timeouts.delete(id); callback(); },
+      delay,
+    });
+    return id;
+  };
+  clearTimeout = (handle: unknown): void => { this.timeouts.delete(handle as number); };
+}
+
+class WidgetHarness {
+  readonly clock = new FakeClock();
+  readonly widgets: unknown[] = [];
+  renderRequests = 0;
+  factory: ((tui: any, theme: any) => { render(width: number): string[] }) | undefined;
+  readonly ui = {
+    setWidget: (_key: string, content: unknown) => {
+      this.widgets.push(content);
+      if (typeof content === "function") this.factory = content as typeof this.factory;
+      if (content === undefined) this.factory = undefined;
+    },
+  };
+  create() {
+    const widget = new LiveSubagentsWidget({
+      now: () => this.clock.now,
+      setInterval: this.clock.setInterval,
+      clearInterval: this.clock.clearInterval,
+      setTimeout: this.clock.setTimeout,
+      clearTimeout: this.clock.clearTimeout,
+    });
+    widget.setUi(this.ui as never);
+    return widget;
+  }
+  render(width = 120): string[] {
+    return this.factory?.({ requestRender: () => { this.renderRequests += 1; }, terminal: { columns: width } }, theme)?.render(width) ?? [];
+  }
+}
+
+test("registers once and animates running jobs through requestRender", () => {
+  const h = new WidgetHarness();
+  const widget = h.create();
+  widget.setJobs([job("run", "running")]);
+  assert.equal(h.widgets.filter((entry) => typeof entry === "function").length, 1);
+  assert.equal(h.clock.intervals.size, 1);
+  assert.equal([...h.clock.intervals.values()][0]?.delay, 80);
+
+  assert.match(plain(h.render()[1] ?? ""), /⠋/);
+  const interval = [...h.clock.intervals.values()][0]!;
+  interval.callback();
+  assert.equal(h.renderRequests, 1);
+  assert.match(plain(h.render()[1] ?? ""), /⠙/);
+
+  widget.setJobs([job("run", "running", {
+    progress: [{ type: "text", text: "new streamed text", timestamp: 10_000 }],
+  })]);
+  assert.equal(h.widgets.filter((entry) => typeof entry === "function").length, 1);
+  assert.equal(h.renderRequests, 1);
+  assert.match(plain(h.render()[2] ?? ""), /new streamed text/);
+});
+
+test("stops animation and expires terminal rows at the nearest deadline", () => {
+  const h = new WidgetHarness();
+  const widget = h.create();
+  widget.setJobs([job("run", "running")]);
+  h.render();
+
+  widget.setJobs([
+    job("first", "completed", { finishedAt: 8_000 }),
+    job("second", "failed", { finishedAt: 9_000 }),
+  ]);
+  assert.equal(h.clock.intervals.size, 0);
+  assert.equal(h.clock.timeouts.size, 1);
+  assert.equal([...h.clock.timeouts.values()][0]?.delay, 1_000);
+
+  h.clock.now = 11_000;
+  [...h.clock.timeouts.values()][0]!.callback();
+  assert.equal(h.clock.timeouts.size, 1);
+  assert.equal([...h.clock.timeouts.values()][0]?.delay, 1_000);
+  assert.equal(plain(h.render().join("\n")).includes("first"), false);
+  assert.equal(plain(h.render().join("\n")).includes("second"), true);
+
+  h.clock.now = 12_000;
+  [...h.clock.timeouts.values()][0]!.callback();
+  assert.equal(h.clock.timeouts.size, 0);
+  assert.equal(h.factory, undefined);
+});
+
+test("removes a collected linger row immediately", () => {
+  const h = new WidgetHarness();
+  const widget = h.create();
+  widget.setJobs([job("done", "completed")]);
+  h.render();
+  widget.setJobs([job("done", "collected")]);
+  assert.equal(h.factory, undefined);
+  assert.equal(h.clock.timeouts.size, 0);
+});
+
+test("dispose clears timers and makes captured callbacks inert", () => {
+  const h = new WidgetHarness();
+  const widget = h.create();
+  widget.setJobs([
+    job("run", "running"),
+    job("done", "completed"),
+  ]);
+  h.render();
+  const interval = [...h.clock.intervals.values()][0]!;
+  const timeout = [...h.clock.timeouts.values()][0]!;
+  widget.dispose();
+  const requests = h.renderRequests;
+
+  assert.equal(h.clock.intervals.size, 0);
+  assert.equal(h.clock.timeouts.size, 0);
+  assert.equal(h.factory, undefined);
+  interval.callback();
+  timeout.callback();
+  assert.equal(h.renderRequests, requests);
 });
