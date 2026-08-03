@@ -59,13 +59,13 @@ test("projects a terminal queued job duration from creation to finish", () => {
 
 test("selects three chronological activity previews and caps grouped status", () => {
   const status = projectJobStatus(job("running", { progress: [
-    { type: "tool", text: "Started read", timestamp: 2_100 },
     { type: "tool", text: "Completed read", timestamp: 2_200 },
-    { type: "diagnostic", text: "Checking diagnostics in src/auth.ts", timestamp: 2_300 },
-    { type: "text", text: "Reviewing the final branch", timestamp: 2_400 },
+    { type: "diagnostic", text: "Checking diagnostics", timestamp: 2_300 },
+    { type: "model", text: "Model reasoning", timestamp: 2_400 },
   ] }), 2_500);
   assert.deepEqual(status.recentActivity.map((item) => item.timestamp), [2_200, 2_300, 2_400]);
-  assert.deepEqual(status.recentActivity.map((item) => item.kind), ["tool", "diagnostic", "assistant"]);
+  assert.deepEqual(status.recentActivity.map((item) => item.kind), ["tool", "diagnostic", "model"]);
+  assert.equal(status.recentActivity.at(-1)?.summary, "Model reasoning");
   for (const item of status.recentActivity) assert.ok(Buffer.byteLength(item.summary, "utf8") <= 512);
   const selected = selectStatusList(Array.from({ length: 25 }, (_, index) => job(index % 3 === 0 ? "running" : index % 3 === 1 ? "completed" : "collected", { id: `job-${index + 1}` })), 10_000);
   assert.equal(selected.statuses.length, 20);

@@ -202,6 +202,7 @@ test("compact details use shared status facts and exclude raw captures", (t) => 
       { type: "text", text: "Completed safe status update", timestamp: 2_500 },
       { type: "tool", text: "Started safe tool", timestamp: 2_600 },
       { type: "diagnostic", text: "Safe diagnostic", timestamp: 2_700 },
+      { type: "model", text: "Model reasoning", timestamp: 2_800 },
     ],
   })]), pi);
   t.after(() => view.dispose());
@@ -218,6 +219,7 @@ test("compact details use shared status facts and exclude raw captures", (t) => 
   for (const secret of ["SECRET_OUTPUT_DO_NOT_SHOW", "SECRET_STDERR_DO_NOT_SHOW", "SECRET_ERROR_DO_NOT_SHOW", "SECRET_MALFORMED_SAMPLE_DO_NOT_SHOW"]) {
     assert.doesNotMatch(text, new RegExp(secret));
   }
+  assert.match(text, /Model reasoning/u);
   assert.match(text, /enter inspect/);
   assert.match(text, /v full/);
 });

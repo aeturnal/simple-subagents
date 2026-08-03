@@ -45,10 +45,10 @@ test("renders active jobs in running, queued, then lingering order", () => {
   const text = lines.map(plain);
 
   assert.equal(text[0], "● Subagents");
-  assert.match(text[1] ?? "", /^├─ ⠋ reviewer  Task running/);
+  assert.match(text[1] ?? "", /^├─ ⠋ reviewer {2}Task running/);
   assert.equal(text[2], "│    ⎿ Started read");
-  assert.match(text[3] ?? "", /^├─ ○ reviewer  Task queued/);
-  assert.match(text[4] ?? "", /^└─ ✓ reviewer  Task done/);
+  assert.match(text[3] ?? "", /^├─ ○ reviewer {2}Task queued/);
+  assert.match(text[4] ?? "", /^└─ ✓ reviewer {2}Task done/);
   assert.equal(text.some((line) => /old|collected|discarded/u.test(line)), false);
 });
 
@@ -87,6 +87,14 @@ test("renders terminal icons and a dim heading when only lingered jobs remain", 
   assert.match(raw[1] ?? "", /\u001B\[32m✓/u);
   assert.match(raw[2] ?? "", /\u001B\[31m✗/u);
   assert.match(raw[3] ?? "", /\u001B\[2m■/u);
+});
+
+test("renders the latest model activity for a running job", () => {
+  const text = render([job("running", "running", {
+    progress: [{ type: "model", text: "Model reasoning", timestamp: 9_500 }],
+  })]).map(plain);
+
+  assert.equal(text[2], "     ⎿ Model reasoning");
 });
 
 test("uses thinking fallback and removes the final activity continuation", () => {

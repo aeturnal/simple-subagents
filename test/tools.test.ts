@@ -532,8 +532,12 @@ test("tool renderers preserve task detail when expanded and keep compact control
   assert.match(compactStart, /… job-2 running/);
   assert.doesNotMatch(compactStart, /Launch model|Launch thinking/);
   const expandedStart = render("subagent_start", started, true);
-  assert.match(expandedStart, /  one/);
-  assert.match(expandedStart, /  two/);
+  assert.match(expandedStart, / {2}one/);
+  assert.match(expandedStart, / {2}two/);
+
+  runner.started[0]?.options.onProgress({ type: "model", text: "Model reasoning", timestamp: 1_500 });
+  const runningStatus = await statusJobs({ id: "job-1" }, services);
+  assert.match(render("subagent_status", runningStatus, true), /Model reasoning/u);
 
   runner.started[0]?.resolve(completed("collected secret"));
   await runner.flush();

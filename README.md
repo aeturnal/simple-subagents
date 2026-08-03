@@ -29,6 +29,8 @@ Ask Pi naturally: “start three parallel subagents to review the tests, depende
 
 While jobs are queued or running, an above-editor tree shows each active subagent, its latest bounded activity, turns, tool uses, tokens, and elapsed time. Running rows use an animated spinner. Completed, failed, and cancelled rows remain visible for three seconds; `/subagents` remains the durable inbox view until the parent collects or discards a result.
 
+Model-turn and reasoning events appear as fixed activity such as `Model turn started` and `Model reasoning`. During a long reasoning stream, the extension refreshes one bounded activity timestamp at most every five seconds. It never captures or displays the model's reasoning text. Heartbeats depend on the selected provider and model emitting Pi reasoning events; the extension does not invent activity when no event arrives.
+
 `subagent_status` reports bounded task, state, timing, profile, access, launch/reported model, usage, and up to three recent activity previews. It never returns the complete captured answer, stderr, error body, malformed protocol samples, or profile prompt. A completed status points the parent to `subagent_control` to collect the result.
 
 ```text
@@ -40,7 +42,7 @@ Usage: 28000 input · 3000 output · 6 turns · $0.08
 Recent activity:
   4s ago   Completed read
   2s ago   Started lsp_diagnostics
-  now      Checking diagnostics in src/auth.ts
+  now      Model reasoning
 ```
 
 ## Agents and access
