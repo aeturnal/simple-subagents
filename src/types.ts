@@ -45,7 +45,7 @@ export interface TextTruncation {
 }
 
 export interface ProgressItem {
-  type: "text" | "tool" | "diagnostic";
+  type: "text" | "tool" | "diagnostic" | "model";
   text: string;
   timestamp: number;
   truncation?: TextTruncation;

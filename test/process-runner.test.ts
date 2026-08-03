@@ -315,6 +315,100 @@ test("reduces split Pi text_delta updates into bounded latest text progress", as
   await running.result;
 });
 
+test("emits fixed turn and throttled reasoning activity without exposing reasoning text", async () => {
+  const child = new FakeChildProcess();
+  const progress: ProgressItem[] = [];
+  let now = 1_000;
+  const runner = new PiProcessRunner({
+    now: () => now,
+    spawnProcess: () => child,
+  });
+  const running = runner.run(runOptions({ onProgress: (item) => progress.push(item) }));
+  const emit = (event: unknown): void => {
+    child.stdout.emit("data", Buffer.from(`${JSON.stringify(event)}\n`));
+  };
+
+  emit({ type: "turn_start" });
+  emit({
+    type: "message_update",
+    message: { role: "assistant" },
+    assistantMessageEvent: { type: "thinking_start", content: "SECRET_START" },
+  });
+  now = 5_999;
+  emit({
+    type: "message_update",
+    message: { role: "assistant" },
+    assistantMessageEvent: { type: "thinking_delta", delta: "SECRET_EARLY" },
+  });
+  now = 6_000;
+  emit({
+    type: "message_update",
+    message: { role: "assistant" },
+    assistantMessageEvent: { type: "thinking_delta", delta: "SECRET_BOUNDARY" },
+  });
+  now = 6_001;
+  emit({
+    type: "message_update",
+    message: { role: "assistant" },
+    assistantMessageEvent: { type: "thinking_end", content: "SECRET_END" },
+  });
+  emit({ type: "turn_end" });
+
+  assert.deepEqual(
+    progress.map(({ type, text, timestamp }) => [type, text, timestamp]),
+    [
+      ["model", "Model turn started", 1_000],
+      ["model", "Model reasoning", 1_000],
+      ["model", "Model reasoning", 6_000],
+      ["model", "Model reasoning finished", 6_001],
+      ["model", "Model turn finished", 6_001],
+    ],
+  );
+  assert.doesNotMatch(JSON.stringify(progress), /SECRET_/u);
+
+  child.close();
+  await running.result;
+});
+
+test("handles split reasoning events and resets heartbeat state at turn boundaries", async () => {
+  const child = new FakeChildProcess();
+  const progress: ProgressItem[] = [];
+  let now = 10_000;
+  const runner = new PiProcessRunner({
+    now: () => now,
+    spawnProcess: () => child,
+  });
+  const running = runner.run(runOptions({ onProgress: (item) => progress.push(item) }));
+
+  const start = JSON.stringify({
+    type: "message_update",
+    message: { role: "assistant" },
+    assistantMessageEvent: { type: "thinking_start", content: "PRIVATE" },
+  });
+  child.stdout.emit("data", Buffer.from(start.slice(0, 30)));
+  child.stdout.emit("data", Buffer.from(`${start.slice(30)}\n`));
+  child.stdout.emit("data", Buffer.from(`${JSON.stringify({ type: "message_update", message: null, assistantMessageEvent: { type: "thinking_delta", delta: "PRIVATE" } })}\n`));
+  child.stdout.emit("data", Buffer.from(`${JSON.stringify({ type: "message_update", message: { role: "user" }, assistantMessageEvent: { type: "thinking_end", content: "PRIVATE" } })}\n`));
+  child.stdout.emit("data", Buffer.from('{"type":"turn_end"}\n{"type":"turn_start"}\n'));
+  now = 10_001;
+  child.stdout.emit("data", Buffer.from(`${JSON.stringify({
+    type: "message_update",
+    message: { role: "assistant" },
+    assistantMessageEvent: { type: "thinking_delta", delta: "PRIVATE_AFTER_RESET" },
+  })}\n`));
+
+  assert.deepEqual(progress.map((item) => item.text), [
+    "Model reasoning",
+    "Model turn finished",
+    "Model turn started",
+    "Model reasoning",
+  ]);
+  assert.doesNotMatch(JSON.stringify(progress), /PRIVATE/u);
+
+  child.close();
+  await running.result;
+});
+
 test("records cumulative partial metadata across multibyte deltas and resets it for the next assistant message", async () => {
   const { child, runner } = spawnedRunner();
   const progress: ProgressItem[] = [];
