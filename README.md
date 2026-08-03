@@ -27,6 +27,8 @@ pi -e ./src/index.ts
 
 Ask Pi naturally: “start three parallel subagents to review the tests, dependencies, and docs”; “show subagent status”; “wait for job-1 and job-3”; “cancel job-2”; or “collect job-1 and job-3.” `/subagents` opens a read-only inspection dashboard: arrows select jobs, Enter toggles compact details, `v` opens or closes the scrollable full view, Page Up/Page Down and Home/End scroll full details, `c` cancels queued or running work, and Escape returns from full view or closes the dashboard.
 
+While jobs are queued or running, an above-editor tree shows each active subagent, its latest bounded activity, turns, tool uses, tokens, and elapsed time. Running rows use an animated spinner. Completed, failed, and cancelled rows remain visible for three seconds; `/subagents` remains the durable inbox view until the parent collects or discards a result.
+
 `subagent_status` reports bounded task, state, timing, profile, access, launch/reported model, usage, and up to three recent activity previews. It never returns the complete captured answer, stderr, error body, malformed protocol samples, or profile prompt. A completed status points the parent to `subagent_control` to collect the result.
 
 ```text
