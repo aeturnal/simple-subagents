@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { resolveLaunchOptions } from "../src/launch-options.ts";
-import { THINKING_LEVELS, type AgentProfile, type JobRequest } from "../src/types.ts";
+import { THINKING_LEVELS, type AgentProfile, type JobRequest, type ThinkingLevel } from "../src/types.ts";
 
-const profile = (model?: string): AgentProfile => ({
+const profile = (model?: string, thinking?: ThinkingLevel): AgentProfile => ({
   name: "reviewer",
   description: "Reviews code",
   systemPrompt: "Review carefully.",
   model,
+  thinking,
   source: "user",
 });
 const request = (overrides: Partial<JobRequest> = {}): JobRequest => ({
@@ -17,42 +18,49 @@ const request = (overrides: Partial<JobRequest> = {}): JobRequest => ({
   ...overrides,
 });
 
-test("resolves override model and thinking precedence without rewriting opaque IDs", () => {
+test("resolves thinking with job, profile, parent, then model or Pi default precedence", () => {
   const cases = [
     {
       name: "job model and job thinking win",
       request: request({ model: "anthropic/claude-sonnet-4-5", thinkingLevel: "low" }),
-      profile: profile("profile/model:high"),
-      defaults: { parentModel: "parent/model", thinkingLevel: "high" as const },
-      expected: { path: "override", modelArgument: "anthropic/claude-sonnet-4-5", thinkingArgument: "low", launchModel: "anthropic/claude-sonnet-4-5", launchThinkingLevel: "low", launchThinkingSource: "job", diagnostics: [] },
+      profile: profile("profile/model", "medium"),
+      defaults: { parentModel: "parent/model", thinkingLevel: "high" },
+      expected: { modelArgument: "anthropic/claude-sonnet-4-5", thinkingArgument: "low", launchModel: "anthropic/claude-sonnet-4-5", launchThinkingLevel: "low", launchThinkingSource: "job", diagnostics: [] },
     },
     {
-      name: "job model inherits parent thinking",
+      name: "profile thinking wins when a job model has no thinking",
       request: request({ model: "ollama/llama3.1:8b" }),
-      profile: profile("profile/model:high"),
-      defaults: { parentModel: "parent/model", thinkingLevel: "high" as const },
-      expected: { path: "override", modelArgument: "ollama/llama3.1:8b", thinkingArgument: "high", launchModel: "ollama/llama3.1:8b", launchThinkingLevel: "high", launchThinkingSource: "parent", diagnostics: [] },
+      profile: profile("profile/model", "medium"),
+      defaults: { parentModel: "parent/model", thinkingLevel: "high" },
+      expected: { modelArgument: "ollama/llama3.1:8b", thinkingArgument: "medium", launchModel: "ollama/llama3.1:8b", launchThinkingLevel: "medium", launchThinkingSource: "profile", diagnostics: [] },
     },
     {
-      name: "thinking-only override keeps profile shorthand opaque",
-      request: request({ thinkingLevel: "low" }),
-      profile: profile("anthropic/claude-sonnet-4-5:high"),
-      defaults: { parentModel: "parent/model", thinkingLevel: "medium" as const },
-      expected: { path: "override", modelArgument: "anthropic/claude-sonnet-4-5:high", thinkingArgument: "low", launchModel: "anthropic/claude-sonnet-4-5:high", launchThinkingLevel: "low", launchThinkingSource: "job", diagnostics: [] },
+      name: "profile thinking wins without job overrides",
+      request: request(),
+      profile: profile("profile/model", "medium"),
+      defaults: { parentModel: "parent/model", thinkingLevel: "high" },
+      expected: { modelArgument: "profile/model", thinkingArgument: "medium", launchModel: "profile/model", launchThinkingLevel: "medium", launchThinkingSource: "profile", diagnostics: [] },
     },
     {
-      name: "thinking-only override allows child default model",
-      request: request({ thinkingLevel: "max" }),
+      name: "valid parent thinking is used when profile thinking is missing",
+      request: request(),
       profile: profile(),
-      defaults: {},
-      expected: { path: "override", modelArgument: undefined, thinkingArgument: "max", launchModel: undefined, launchThinkingLevel: "max", launchThinkingSource: "job", diagnostics: [] },
+      defaults: { parentModel: "parent/model", thinkingLevel: "high" },
+      expected: { modelArgument: "parent/model", thinkingArgument: "high", launchModel: "parent/model", launchThinkingLevel: "high", launchThinkingSource: "parent", diagnostics: [] },
     },
     {
-      name: "job model without parent thinking defers to model or Pi",
-      request: request({ model: "vendor/real-model:high" }),
+      name: "missing thinking defers to model or Pi default",
+      request: request(),
       profile: profile(),
-      defaults: {},
-      expected: { path: "override", modelArgument: "vendor/real-model:high", thinkingArgument: undefined, launchModel: "vendor/real-model:high", launchThinkingLevel: undefined, launchThinkingSource: "model_or_pi_default", diagnostics: [] },
+      defaults: { parentModel: "parent/model" },
+      expected: { modelArgument: "parent/model", thinkingArgument: undefined, launchModel: "parent/model", launchThinkingLevel: undefined, launchThinkingSource: "model_or_pi_default", diagnostics: [] },
+    },
+    {
+      name: "invalid parent thinking defers without a diagnostic",
+      request: request(),
+      profile: profile(),
+      defaults: { parentModel: "parent/model", thinkingLevel: "ultra" },
+      expected: { modelArgument: "parent/model", thinkingArgument: undefined, launchModel: "parent/model", launchThinkingLevel: undefined, launchThinkingSource: "model_or_pi_default", diagnostics: [] },
     },
   ];
 
@@ -65,20 +73,22 @@ test("accepts every supported job thinking level", () => {
   for (const thinkingLevel of THINKING_LEVELS) {
     assert.deepEqual(
       resolveLaunchOptions(request({ thinkingLevel }), profile(), {}),
-      { path: "override", modelArgument: undefined, thinkingArgument: thinkingLevel, launchModel: undefined, launchThinkingLevel: thinkingLevel, launchThinkingSource: "job", diagnostics: [] },
+      { modelArgument: undefined, thinkingArgument: thinkingLevel, launchModel: undefined, launchThinkingLevel: thinkingLevel, launchThinkingSource: "job", diagnostics: [] },
     );
   }
 });
 
-test("keeps the existing legacy suffix behavior isolated", () => {
-  assert.deepEqual(
-    resolveLaunchOptions(request(), profile(), { parentModel: "ollama/llama3.1:8b", thinkingLevel: "high" }),
-    { path: "legacy", modelArgument: "ollama/llama3.1:8b:high", thinkingArgument: undefined, launchModel: "ollama/llama3.1:8b:high", launchThinkingLevel: "high", launchThinkingSource: "legacy", diagnostics: [] },
-  );
-  assert.deepEqual(
-    resolveLaunchOptions(request(), profile("anthropic/sonnet:low"), { parentModel: "parent/model", thinkingLevel: "high" }),
-    { path: "legacy", modelArgument: "anthropic/sonnet:low", thinkingArgument: undefined, launchModel: "anthropic/sonnet:low", launchThinkingLevel: undefined, launchThinkingSource: "legacy", diagnostics: [] },
-  );
+test("rejects reserved thinking suffixes in per-job model IDs while keeping opaque model IDs valid", () => {
+  for (const thinkingLevel of THINKING_LEVELS) {
+    const result = resolveLaunchOptions(request({ model: `provider/model:${thinkingLevel}` }), profile(), {});
+    assert.equal(result.diagnostics.length, 1);
+    assert.match(result.diagnostics[0] ?? "", new RegExp(`:${thinkingLevel}`));
+    assert.match(result.diagnostics[0] ?? "", /thinkingLevel/);
+  }
+
+  for (const model of ["ollama/llama3.1:8b", "vendor/model:preview", "vendor/model:real:tag"]) {
+    assert.deepEqual(resolveLaunchOptions(request({ model }), profile(), {}).diagnostics, [], model);
+  }
 });
 
 test("reports invalid model and thinking values without normalizing them", () => {

@@ -9,7 +9,13 @@ export type AccessMode = "read-only" | "write";
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
-export type LaunchThinkingSource = "job" | "parent" | "model_or_pi_default" | "legacy";
+export type LaunchThinkingSource =
+  | "job"
+  | "profile"
+  | "parent"
+  | "model_or_pi_default"
+  // Temporary compatibility for Task 5/6 consumers. Task 6 removes this member.
+  | "legacy";
 
 export interface AgentProfile {
   name: string;

@@ -246,12 +246,11 @@ test("assigns stable increasing IDs and passes resolved process options", () => 
   assert.equal(first?.createdAt, 100);
   assert.equal(runner.started[0]?.options.cwd, "/request");
   assert.deepEqual(runner.started[0]?.options.launchOptions, {
-    path: "legacy",
-    modelArgument: "parent-model:high",
-    thinkingArgument: undefined,
-    launchModel: "parent-model:high",
+    modelArgument: "parent-model",
+    thinkingArgument: "high",
+    launchModel: "parent-model",
     launchThinkingLevel: "high",
-    launchThinkingSource: "legacy",
+    launchThinkingSource: "parent",
     diagnostics: [],
   });
 });
@@ -291,6 +290,22 @@ test("rejects one invalid override before creating or starting any batch job", (
   assert.throws(() => manager.enqueue(requests, profiles, defaults), /non-empty trimmed string/i);
   assert.deepEqual(manager.list(), []);
   assert.equal(runner.started.length, 0);
+
+  const [next] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.equal(next?.id, "job-1");
+});
+
+test("rejects a suffixed model in a batch before creating or starting any job", () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  const requests = [
+    { ...makeRequests(1)[0]!, model: "openai/gpt-5" },
+    { ...makeRequests(1)[0]!, task: "invalid", model: "openai-codex/gpt-5.6-sol:high" },
+  ];
+
+  assert.throws(() => manager.enqueue(requests, profiles, defaults), /:high.*thinkingLevel|thinkingLevel.*:high/);
+  assert.equal(runner.started.length, 0);
+  assert.deepEqual(manager.list(), []);
 
   const [next] = manager.enqueue(makeRequests(1), profiles, defaults);
   assert.equal(next?.id, "job-1");

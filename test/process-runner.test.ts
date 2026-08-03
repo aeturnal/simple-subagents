@@ -185,7 +185,6 @@ test("passes opaque override model and explicit thinking as separate arguments",
       request: nextRequest,
       profile: nextProfile,
       launchOptions: {
-        path: "override",
         modelArgument: model,
         thinkingArgument: "low",
         launchModel: model,
@@ -208,7 +207,6 @@ test("passes thinking without model when child Pi must select its default", asyn
   const { child, runner, invocation } = spawnedRunner();
   const running = runner.run(runOptions({
     launchOptions: {
-      path: "override",
       modelArgument: undefined,
       thinkingArgument: "max",
       launchModel: undefined,
