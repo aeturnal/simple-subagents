@@ -1,6 +1,6 @@
 import { truncateUtf8 } from "./output.js";
 import { getLaunchToolAllowlist } from "./profile-capabilities.js";
-import type { AgentProfile } from "./types.js";
+import type { AgentProfile, ThinkingLevel } from "./types.js";
 
 export interface PublicAgentProfile {
   name: string;
@@ -8,6 +8,8 @@ export interface PublicAgentProfile {
   source: "builtin" | "user";
   model: string | null;
   inheritsParentModel: boolean;
+  thinking: ThinkingLevel | null;
+  inheritsParentThinking: boolean;
   readOnlyToolAllowlist: string[];
   writableToolAllowlist: string[];
   supportsWrite: boolean;
@@ -63,6 +65,8 @@ export function toPublicAgentProfile(profile: AgentProfile): PublicAgentProfile 
     source: profile.source,
     model,
     inheritsParentModel: model === null,
+    thinking: profile.thinking ?? null,
+    inheritsParentThinking: profile.thinking === undefined,
     readOnlyToolAllowlist,
     writableToolAllowlist,
     supportsWrite: writableToolAllowlist.some((tool) => tool === "bash" || tool === "edit" || tool === "write"),
@@ -76,6 +80,8 @@ const formatPublicProfile = (profile: PublicAgentProfile): string => [
   `  Source: ${profile.source}`,
   `  Configured model: ${profile.model ?? "none"}`,
   `  Inherits parent model: ${profile.inheritsParentModel ? "yes" : "no"}`,
+  `  Configured thinking: ${profile.thinking ?? "none"}`,
+  `  Inherits parent thinking: ${profile.inheritsParentThinking ? "yes" : "no"}`,
   `  Read-only launch allowlist: ${list(profile.readOnlyToolAllowlist)}`,
   `  Writable launch allowlist: ${list(profile.writableToolAllowlist)}`,
   `  Supports write-capable tools: ${profile.supportsWrite ? "yes" : "no"}`,
