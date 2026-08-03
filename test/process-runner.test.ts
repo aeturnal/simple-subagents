@@ -149,7 +149,7 @@ test("falls back to the pi command for a Bun virtual current script", async () =
   }
 });
 
-test("passes legacy launch options with child extension isolation", async () => {
+test("passes inherited thinking separately with child extension isolation", async () => {
   const { child, runner, invocation } = spawnedRunner();
   const legacyProfile = profile({ systemPrompt: "" });
   const legacyRequest = request();
@@ -167,10 +167,13 @@ test("passes legacy launch options with child extension isolation", async () => 
     "--no-session",
     "--no-extensions",
     "--model",
-    "ollama/llama3.1:8b:high",
+    "ollama/llama3.1:8b",
+    "--thinking",
+    "high",
     "--no-tools",
     "Inspect the repository",
   ]);
+  assert.equal(invocation().args.includes("ollama/llama3.1:8b:high"), false);
   assertIsolatedInvocation(invocation().args);
   child.close();
   await running.result;
