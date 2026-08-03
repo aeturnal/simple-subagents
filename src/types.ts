@@ -1,3 +1,5 @@
+import { inspectJobState } from "./job-lifecycle.js";
+
 export interface SimpleSubagentsConfig {
   confirmWrites: boolean;
 }
@@ -76,5 +78,4 @@ export interface Job {
   truncation?: TextTruncation;
 }
 
-export const isSettled = (state: JobState): boolean =>
-  state === "completed" || state === "failed" || state === "cancelled" || state === "collected" || state === "discarded";
+export const isSettled = (state: JobState): boolean => inspectJobState(state).settled;
