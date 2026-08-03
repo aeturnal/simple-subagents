@@ -1,3 +1,4 @@
+import { inspectJobState } from "./job-lifecycle.js";
 import { truncateUtf8 } from "./output.js";
 import type { AccessMode, Job, JobState, UsageStats } from "./types.js";
 
@@ -95,9 +96,9 @@ const captureNotice = (label: string, truncation?: { originalBytes: number; kept
   truncation && `${label} capture truncated: retained ${truncation.keptBytes} of ${truncation.originalBytes} bytes.`;
 
 export function projectJobStatus(job: Readonly<Job>, now: number): JobStatus {
-  const isTerminal = job.state === "completed" || job.state === "failed" || job.state === "cancelled" || job.state === "collected" || job.state === "discarded";
-  const queueEnd = job.state === "queued" ? now : job.startedAt ?? (isTerminal ? job.finishedAt : undefined);
-  const runEnd = job.state === "running" ? now : isTerminal ? job.finishedAt : undefined;
+  const lifecycle = inspectJobState(job.state);
+  const queueEnd = job.state === "queued" ? now : job.startedAt ?? (lifecycle.settled ? job.finishedAt : undefined);
+  const runEnd = job.state === "running" ? now : lifecycle.settled ? job.finishedAt : undefined;
   const latestPartial = [...job.progress].reverse().find((item) => item.type === "text");
   const recentActivity = job.progress.flatMap((item): StatusActivity[] => {
     const text = boundedPreview(item.text);
@@ -136,17 +137,17 @@ export function projectJobStatus(job: Readonly<Job>, now: number): JobStatus {
     reportedModel: job.model && boundedPreview(job.model),
     usage: structuredClone(job.usage),
     recentActivity,
-    resultReady: job.state === "completed" || job.state === "failed" || job.state === "cancelled",
+    resultReady: lifecycle.inbox,
     hasError: job.state === "failed" || Boolean(job.errorMessage || job.stderr || job.errorTruncation || job.stderrTruncation),
     captureNotices,
   };
 }
 
 export function selectStatusList(jobs: readonly Job[], now: number): StatusListResult {
-  const group = (state: JobState): number =>
-    state === "queued" || state === "running" ? 0
-      : state === "completed" || state === "failed" || state === "cancelled" ? 1
-        : 2;
+  const group = (state: JobState): number => {
+    const lifecycle = inspectJobState(state);
+    return lifecycle.settled ? lifecycle.inbox ? 1 : 2 : 0;
+  };
   const statuses = jobs
     .map((job, index) => ({ index, status: projectJobStatus(job, now) }))
     .sort((left, right) => group(left.status.state) - group(right.status.state) || left.index - right.index)

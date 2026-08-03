@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, type Component, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { boundedPreview, projectJobStatus, sanitizeTerminalText, type JobStatus } from "./job-status.js";
+import { decideJobControl, inspectJobState } from "./job-lifecycle.js";
 import { JobManager } from "./job-manager.js";
 import type { Job, JobState } from "./types.js";
 
@@ -16,11 +17,9 @@ type ListRecord = { kind: "heading"; label: string } | JobRecord;
 const attentionCounts = (jobs: readonly Job[]): AttentionCounts => jobs.reduce<AttentionCounts>((counts, job) => {
   if (job.state === "queued") counts.queued += 1;
   else if (job.state === "running") counts.running += 1;
-  else if (["completed", "failed", "cancelled"].includes(job.state)) counts.ready += 1;
+  else if (inspectJobState(job.state).inbox) counts.ready += 1;
   return counts;
 }, { queued: 0, running: 0, ready: 0 });
-
-const isInbox = (state: JobState): boolean => state === "completed" || state === "failed" || state === "cancelled";
 
 const textFingerprint = (text: string): string => {
   let hash = 2_166_136_261;
@@ -152,7 +151,7 @@ export class SubagentsDashboard implements Component {
       return;
     } else {
       const selected = jobs[this.selected];
-      if (!selected || !matchesKey(data, "c") || (selected.state !== "queued" && selected.state !== "running")) return;
+      if (!selected || !matchesKey(data, "c") || decideJobControl(selected.state, "cancel").kind !== "apply") return;
       try {
         void this.options.manager.cancel(selected.id).catch(() => this.actionFailed());
       } catch {
@@ -216,7 +215,7 @@ export class SubagentsDashboard implements Component {
     const groups: Array<[string, JobRecord[]]> = [
       ["QUEUED", jobs.filter((job) => job.state === "queued").map((job) => ({ kind: "job", ...job }))],
       ["RUNNING", jobs.filter((job) => job.state === "running").map((job) => ({ kind: "job", ...job }))],
-      ["INBOX", jobs.filter((job) => isInbox(job.state)).map((job) => ({ kind: "job", ...job }))],
+      ["INBOX", jobs.filter((job) => inspectJobState(job.state).inbox).map((job) => ({ kind: "job", ...job }))],
     ];
     return groups.flatMap(([label, records]) => records.length === 0 ? [] : [{ kind: "heading", label }, ...records]);
   }
