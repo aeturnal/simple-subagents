@@ -73,6 +73,30 @@ test("selects three chronological activity previews and caps grouped status", ()
   assert.deepEqual(selected.statuses.slice(0, 2).map((item) => item.state), ["running", "running"]);
 });
 
+test("presents profile thinking in projected and single-job status", () => {
+  const status = projectJobStatus(job("running", {
+    launchThinkingLevel: "medium",
+    launchThinkingSource: "profile",
+  }), 8_000);
+
+  assert.equal(status.launchThinking, "medium (profile)");
+  assert.match(formatSingleJobStatus(status, 8_000), /Launch thinking: medium \(profile\)/);
+});
+
+test("preserves job, parent, and default thinking source labels in status", () => {
+  assert.equal(projectJobStatus(job("running", {
+    launchThinkingLevel: "high",
+    launchThinkingSource: "job",
+  }), 8_000).launchThinking, "high (job override)");
+  assert.equal(projectJobStatus(job("running", {
+    launchThinkingLevel: "low",
+    launchThinkingSource: "parent",
+  }), 8_000).launchThinking, "low (parent session)");
+  assert.equal(projectJobStatus(job("running", {
+    launchThinkingSource: "model_or_pi_default",
+  }), 8_000).launchThinking, "model or Pi default");
+});
+
 test("formatters expose facts but exclude all captured and private fields", () => {
   const text = formatSingleJobStatus(projectJobStatus(job("failed"), 8_000), 8_000);
   assert.match(text, /job-1.*failed/);

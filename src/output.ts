@@ -38,12 +38,12 @@ const usageLine = (job: Job): string =>
 const thinkingSelection = (job: Job): string | undefined => {
   if (job.launchThinkingLevel) {
     const source = job.launchThinkingSource === "job" ? "job override"
-      : job.launchThinkingSource === "parent" ? "parent session"
-        : "legacy profile/parent behavior";
+      : job.launchThinkingSource === "profile" ? "profile"
+        : job.launchThinkingSource === "parent" ? "parent session"
+          : "model or Pi default";
     return `${job.launchThinkingLevel} (${source})`;
   }
   if (job.launchThinkingSource === "model_or_pi_default") return "model or Pi default";
-  if (job.launchThinkingSource === "legacy") return "legacy profile/parent behavior";
   return undefined;
 };
 

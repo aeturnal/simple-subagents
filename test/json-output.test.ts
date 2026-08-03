@@ -158,6 +158,25 @@ test("formats launch selection and matching child-reported model explicitly", ()
   assert.match(formatted, /- Reported model: openai\/gpt-5/);
 });
 
+test("formats profile thinking source in collected output", () => {
+  const formatted = formatCollectedResult(job({
+    launchThinkingLevel: "medium",
+    launchThinkingSource: "profile",
+  }));
+
+  assert.match(formatted, /- Launch thinking: medium \(profile\)/);
+});
+
+test("preserves parent and default thinking source labels in collected output", () => {
+  assert.match(formatCollectedResult(job({
+    launchThinkingLevel: "low",
+    launchThinkingSource: "parent",
+  })), /- Launch thinking: low \(parent session\)/);
+  assert.match(formatCollectedResult(job({
+    launchThinkingSource: "model_or_pi_default",
+  })), /- Launch thinking: model or Pi default/);
+});
+
 test("retains differing launch and reported models", () => {
   const formatted = formatCollectedResult(job({
     launchModel: "anthropic/sonnet",
