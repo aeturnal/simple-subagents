@@ -52,6 +52,26 @@ test("renders active jobs in running, queued, then lingering order", () => {
   assert.equal(text.some((line) => /old|collected|discarded/u.test(line)), false);
 });
 
+test("preserves input order inside running, queued, and lingering groups", () => {
+  const rows = render([
+    job("done-first", "completed"),
+    job("queued-first", "queued"),
+    job("running-first", "running"),
+    job("done-second", "failed"),
+    job("queued-second", "queued"),
+    job("running-second", "running"),
+  ]).map(plain).filter((line) => line.includes("Task "));
+
+  assert.deepEqual(rows.map((line) => line.match(/Task ([a-z-]+)/u)?.[1]), [
+    "running-first",
+    "running-second",
+    "queued-first",
+    "queued-second",
+    "done-first",
+    "done-second",
+  ]);
+});
+
 test("renders terminal icons and a dim heading when only lingered jobs remain", () => {
   const text = render([
     job("ok", "completed"),
