@@ -103,6 +103,16 @@ test("uses thinking fallback and removes the final activity continuation", () =>
   assert.equal(text[2], "     ⎿ thinking…");
 });
 
+test("shows the selected thinking level without source detail in a compact row", () => {
+  const row = plain(render([job("running", "running", {
+    launchThinkingLevel: "medium",
+    launchThinkingSource: "profile",
+  })])[1] ?? "");
+
+  assert.match(row, /medium/);
+  assert.doesNotMatch(row, /profile/);
+});
+
 test("selects and wraps spinner frames", () => {
   assert.match(plain(render([job("running", "running")], 10_000, 2)[1] ?? ""), /⠹/);
   assert.match(plain(render([job("running", "running")], 10_000, 12)[1] ?? ""), /⠹/);

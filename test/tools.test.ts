@@ -246,8 +246,8 @@ test("statusJobs returns rich bounded status for one job", async () => {
   assert.match(content, /job-1.*completed/);
   assert.match(content, /Task: one/);
   assert.match(content, /Agent: generic.*Access: read-only/);
-  assert.match(content, /Launch model: parent\/model:high/);
-  assert.match(content, /Launch thinking: high \(legacy profile\/parent behavior\)/);
+  assert.match(content, /Launch model: parent\/model/);
+  assert.match(content, /Launch thinking: high \(parent session\)/);
   assert.match(content, /Usage: input 1, output 2, cache read 3, cache write 4, cost 0.5, turns 1/);
   assert.match(content, /Result ready.*collect job-1/);
   assert.doesNotMatch(content, /secret final answer|systemPrompt|stderr|malformed/);
@@ -577,15 +577,33 @@ test("tool renderers preserve task detail when expanded and keep compact control
   assert.match(render("subagent_start", declined, true), /Writable jobs were declined\./);
   assert.match(render("subagent_control", invalid, true), /Cannot collect/i);
 
-  const agents = await listAgents(services);
-  const compactAgents = render("subagent_agents", agents, false);
+  const profileThinkingServices = createServices(undefined, {
+    getProfiles: async () => new Map([
+      ["generic", { ...profile, name: "generic", source: "builtin" as const }],
+      ["reviewer", { ...profile, thinking: "medium" as const }],
+    ]),
+  }).services;
+  const profileJobs = await startJobs({ tasks: [{ task: "profile thinking", agent: "reviewer" }] }, profileThinkingServices, {} as never);
+  const profilePi = new FakePi();
+  registerSubagentTools(profilePi as never, profileThinkingServices);
+  const profileRendered = (toolName: string, result: unknown, expanded: boolean): string =>
+    profilePi.tools.get(toolName)?.renderResult(result, { expanded }, theme).render(160).join("\n") ?? "";
+  assert.match(profileRendered("subagent_start", profileJobs, true), /Launch thinking: medium \(profile\)/);
+  const profileStatus = await statusJobs({ id: "job-1" }, profileThinkingServices);
+  assert.match(profileRendered("subagent_status", profileStatus, true), /Launch thinking: medium \(profile\)/);
+  await controlJobs({ action: "cancel", ids: ["job-1"] }, profileThinkingServices);
+
+  const agents = await listAgents(profileThinkingServices);
+  const compactAgents = profileRendered("subagent_agents", agents, false);
   assert.match(compactAgents, /Available subagent profiles:/);
   assert.match(compactAgents, /- generic — Reviews code/);
   assert.match(compactAgents, /- reviewer — Reviews code/);
   assert.doesNotMatch(compactAgents, /Configured model|launch allowlist/);
-  const expandedAgents = render("subagent_agents", agents, true);
+  const expandedAgents = profileRendered("subagent_agents", agents, true);
   assert.match(expandedAgents, /reviewer — Reviews code/);
   assert.match(expandedAgents, /Model: parent model \(inherited\)/);
+  assert.match(expandedAgents, /Thinking: medium/);
+  assert.match(expandedAgents, /generic — Reviews code[\s\S]*Thinking: parent thinking \(inherited\)/);
   assert.match(expandedAgents, /Read-only launch allowlist: none/);
   assert.match(expandedAgents, /Writable launch allowlist: none/);
   assert.match(expandedAgents, /Supports write-capable tools: no/);
@@ -828,12 +846,11 @@ test("runtime loads config and profiles, surfaces diagnostics, confirms writable
       cwd: "/workspace",
       profile: "writer",
       launchOptions: {
-        path: "legacy",
-        modelArgument: "parent/model:high",
-        thinkingArgument: undefined,
-        launchModel: "parent/model:high",
+        modelArgument: "parent/model",
+        thinkingArgument: "high",
+        launchModel: "parent/model",
         launchThinkingLevel: "high",
-        launchThinkingSource: "legacy",
+        launchThinkingSource: "parent",
         diagnostics: [],
       },
     },
@@ -841,12 +858,11 @@ test("runtime loads config and profiles, surfaces diagnostics, confirms writable
       cwd: "/workspace",
       profile: "writer",
       launchOptions: {
-        path: "legacy",
-        modelArgument: "parent/model:high",
-        thinkingArgument: undefined,
-        launchModel: "parent/model:high",
+        modelArgument: "parent/model",
+        thinkingArgument: "high",
+        launchModel: "parent/model",
         launchThinkingLevel: "high",
-        launchThinkingSource: "legacy",
+        launchThinkingSource: "parent",
         diagnostics: [],
       },
     },

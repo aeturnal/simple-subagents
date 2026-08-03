@@ -192,6 +192,8 @@ test("compact details use shared status facts and exclude raw captures", (t) => 
   const pi = new FakePi();
   const view = dashboard(new FakeManager([job("job-1", "failed", {
     launchModel: "gpt-5.6-terra",
+    launchThinkingLevel: "medium",
+    launchThinkingSource: "profile",
     model: "gpt-5.6-sol",
     output: "SECRET_OUTPUT_DO_NOT_SHOW",
     stderr: "SECRET_STDERR_DO_NOT_SHOW",
@@ -213,13 +215,14 @@ test("compact details use shared status facts and exclude raw captures", (t) => 
 
   for (const line of lines) assert.ok(visibleWidth(line) <= 120, `${visibleWidth(line)} > 120: ${line}`);
   assert.ok(lines.length <= pi.ui.rows);
-  for (const label of ["Task:", "Agent:", "Access:", "Launch model:", "Reported model:", "Created:", "Queue:", "Run:", "Usage:", "Recent activity:"]) {
+  for (const label of ["Task:", "Agent:", "Access:", "Launch model:", "Launch thinking:", "Reported model:", "Created:", "Queue:", "Run:", "Usage:", "Recent activity:"]) {
     assert.match(text, new RegExp(label));
   }
   for (const secret of ["SECRET_OUTPUT_DO_NOT_SHOW", "SECRET_STDERR_DO_NOT_SHOW", "SECRET_ERROR_DO_NOT_SHOW", "SECRET_MALFORMED_SAMPLE_DO_NOT_SHOW"]) {
     assert.doesNotMatch(text, new RegExp(secret));
   }
   assert.match(text, /Model reasoning/u);
+  assert.match(text, /Launch thinking: medium \(profile\)/);
   assert.match(text, /enter inspect/);
   assert.match(text, /v full/);
 });
@@ -328,7 +331,7 @@ test("full title uses the projected job status ID", (t) => {
 
 test("full metadata wraps each labeled field before truncation", (t) => {
   const pi = new FakePi();
-  pi.ui.rows = 200;
+  pi.ui.rows = 220;
   const view = dashboard(new FakeManager([job("job-1", "failed", {
     request: { task: "Task for job-1", agent: "agent-AGENT_VALUE_END", writeAccess: true },
     profile: { name: "agent-AGENT_VALUE_END", description: "Reviews code", systemPrompt: "Review carefully.", source: "user" },
@@ -346,6 +349,7 @@ test("full metadata wraps each labeled field before truncation", (t) => {
     "Agent: agent-AGENT_VALUE_END",
     "Access: write",
     "Launch model: launch-model-LAUNCH_VALUE_END",
+    "Launch thinking: model or Pi default",
     "Reported model: reported-model-REPORTED_VALUE_END",
     "Created: 1970-01-01T00:00:01.000Z",
     "Finished: 1970-01-01T00:00:03.000Z",

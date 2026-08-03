@@ -13,9 +13,7 @@ export type LaunchThinkingSource =
   | "job"
   | "profile"
   | "parent"
-  | "model_or_pi_default"
-  // Temporary compatibility for Task 5/6 consumers. Task 6 removes this member.
-  | "legacy";
+  | "model_or_pi_default";
 
 export interface AgentProfile {
   name: string;

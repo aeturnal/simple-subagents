@@ -59,6 +59,7 @@ const formatStats = (job: Readonly<Job>, now: number): string => {
   if (toolUses > 0) parts.push(`${toolUses} tool use${toolUses === 1 ? "" : "s"}`);
   const tokens = Math.max(0, job.usage.input + job.usage.output);
   if (tokens > 0) parts.push(formatTokens(tokens));
+  if (job.launchThinkingLevel) parts.push(job.launchThinkingLevel);
   const duration = formatDuration(durationMs(job, now));
   parts.push(job.state === "queued" ? `queued ${duration}` : duration);
   return parts.join(" · ");

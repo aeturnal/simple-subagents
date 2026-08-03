@@ -151,12 +151,12 @@ test("falls back to the pi command for a Bun virtual current script", async () =
 
 test("passes inherited thinking separately with child extension isolation", async () => {
   const { child, runner, invocation } = spawnedRunner();
-  const legacyProfile = profile({ systemPrompt: "" });
-  const legacyRequest = request();
+  const inheritedProfile = profile({ systemPrompt: "" });
+  const inheritedRequest = request();
   const running = runner.run(runOptions({
-    request: legacyRequest,
-    profile: legacyProfile,
-    launchOptions: resolveLaunchOptions(legacyRequest, legacyProfile, { parentModel: "ollama/llama3.1:8b", thinkingLevel: "high" }),
+    request: inheritedRequest,
+    profile: inheritedProfile,
+    launchOptions: resolveLaunchOptions(inheritedRequest, inheritedProfile, { parentModel: "ollama/llama3.1:8b", thinkingLevel: "high" }),
   }));
 
   assert.deepEqual(invocation().args, [
@@ -180,7 +180,7 @@ test("passes inherited thinking separately with child extension isolation", asyn
 });
 
 test("passes opaque override model and explicit thinking as separate arguments", async () => {
-  for (const model of ["anthropic/sonnet:high", "ollama/llama3.1:8b", "vendor/model:real:high"]) {
+  for (const model of ["anthropic/sonnet:preview", "ollama/llama3.1:8b", "vendor/model:real:tag"]) {
     const { child, runner, invocation } = spawnedRunner();
     const nextRequest = request();
     const nextProfile = profile({ systemPrompt: "", tools: ["read", "bash"] });

@@ -280,6 +280,7 @@ const renderAgentProfiles = (
   const detail = profiles.map((profile) => [
     `${profile.name} — ${profile.description}`,
     `  Model: ${profile.model ?? "parent model (inherited)"}`,
+    `  Thinking: ${profile.thinking ?? "parent thinking (inherited)"}`,
     `  Read-only launch allowlist: ${profile.readOnlyToolAllowlist.join(", ") || "none"}`,
     `  Writable launch allowlist: ${profile.writableToolAllowlist.join(", ") || "none"}`,
     `  Supports write-capable tools: ${profile.supportsWrite ? "yes" : "no"}`,
@@ -288,13 +289,11 @@ const renderAgentProfiles = (
 };
 
 const launchThinking = (job: Job): string => {
-  if (job.launchThinkingLevel) {
-    const source = job.launchThinkingSource === "job" ? "job override"
+  const source = job.launchThinkingSource === "job" ? "job override"
+    : job.launchThinkingSource === "profile" ? "profile"
       : job.launchThinkingSource === "parent" ? "parent session"
-        : "legacy profile/parent behavior";
-    return `${job.launchThinkingLevel} (${source})`;
-  }
-  return job.launchThinkingSource === "legacy" ? "legacy profile/parent behavior" : "model or Pi default";
+        : "model or Pi default";
+  return job.launchThinkingLevel ? `${job.launchThinkingLevel} (${source})` : source;
 };
 
 const launchDetail = (job: Job): string => [
