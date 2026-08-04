@@ -37,7 +37,7 @@ Model-turn and reasoning events appear as fixed activity such as `Model turn sta
 job-2 — running · running for 2m 14s
 Task: Review authentication changes
 Agent: reviewer · Access: read-only
-Model: openai-codex/gpt-5.6-terra · Thinking: medium (job override)
+Model: openai-codex/gpt-5.6-terra · Thinking: medium (profile)
 Usage: 28000 input · 3000 output · 6 turns · $0.08
 Recent activity:
   4s ago   Completed read
