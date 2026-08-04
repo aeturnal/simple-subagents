@@ -2,6 +2,7 @@ import { inspectJobState } from "./job-lifecycle.js";
 
 export interface SimpleSubagentsConfig {
   confirmWrites: boolean;
+  allowThinkingOverrides: boolean;
 }
 
 export type JobState = "queued" | "running" | "completed" | "failed" | "cancelled" | "collected" | "discarded";

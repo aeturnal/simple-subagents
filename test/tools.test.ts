@@ -814,7 +814,7 @@ test("runtime does not register or emit automatic completion messages", async ()
   const manager = new JobManager({ runner });
   createSimpleSubagentsExtension({
     createManager: () => manager,
-    loadConfig: async () => ({ config: { confirmWrites: false } }),
+    loadConfig: async () => ({ config: { confirmWrites: false, allowThinkingOverrides: false } }),
     discoverProfiles: async () => ({
       agents: [{ ...profile, name: "generic", source: "builtin" }],
       diagnostics: [],
@@ -844,7 +844,7 @@ test("runtime loads config only from Pi's agent directory, never the project con
     getAgentDir: () => "/pi-agent",
     loadConfig: async (path) => {
       configPaths.push(path);
-      return { config: { confirmWrites: false } };
+      return { config: { confirmWrites: false, allowThinkingOverrides: false } };
     },
     discoverProfiles: async () => ({ agents: [], diagnostics: [] }),
   };
@@ -865,7 +865,7 @@ test("runtime loads config and profiles, surfaces diagnostics, confirms writable
     getAgentDir: () => "/pi-agent",
     loadConfig: async (path) => {
       assert.equal(path, "/pi-agent/simple-subagents.json");
-      return { config: { confirmWrites: true }, warning: "config warning" };
+      return { config: { confirmWrites: true, allowThinkingOverrides: false }, warning: "config warning" };
     },
     discoverProfiles: async () => ({ agents: [{ ...profile, name: "writer" }], diagnostics: ["profile warning"] }),
   };
@@ -927,7 +927,7 @@ test("runtime reports writable jobs declined when UI confirmation rejects", asyn
   const manager = new JobManager({ runner });
   createSimpleSubagentsExtension({
     createManager: () => manager,
-    loadConfig: async () => ({ config: { confirmWrites: true } }),
+    loadConfig: async () => ({ config: { confirmWrites: true, allowThinkingOverrides: false } }),
     discoverProfiles: async () => ({ agents: [{ ...profile, name: "writer" }], diagnostics: [] }),
   })(pi as never);
   await pi.emit("session_start", {}, fakeContext({ hasUI: true, confirmResult: false }, pi));
@@ -949,7 +949,7 @@ test("runtime starts writable jobs without confirmation when configuration disab
   const manager = new JobManager({ runner });
   createSimpleSubagentsExtension({
     createManager: () => manager,
-    loadConfig: async () => ({ config: { confirmWrites: false } }),
+    loadConfig: async () => ({ config: { confirmWrites: false, allowThinkingOverrides: false } }),
     discoverProfiles: async () => ({ agents: [{ ...profile, name: "writer" }], diagnostics: [] }),
   })(pi as never);
   await pi.emit("session_start", {}, fakeContext({ hasUI: false }, pi));
@@ -970,7 +970,7 @@ test("runtime reports writable confirmation requiring interactive UI when confir
   const manager = new JobManager({ runner: new ControlledRunner() });
   createSimpleSubagentsExtension({
     createManager: () => manager,
-    loadConfig: async () => ({ config: { confirmWrites: true } }),
+    loadConfig: async () => ({ config: { confirmWrites: true, allowThinkingOverrides: false } }),
     discoverProfiles: async () => ({ agents: [{ ...profile, name: "writer" }], diagnostics: [] }),
   })(pi as never);
   await pi.emit("session_start", {}, fakeContext({ hasUI: false }, pi));

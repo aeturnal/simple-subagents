@@ -13,8 +13,56 @@ test("missing config falls back safely", async () => {
 
   const result = await loadConfig(configPath);
 
-  assert.deepEqual(result.config, { confirmWrites: false });
+  assert.deepEqual(result.config, {
+    confirmWrites: false,
+    allowThinkingOverrides: false,
+  });
   assert.equal(result.warning, undefined);
+});
+
+test("valid configuration preserves both policy values", async () => {
+  const root = await mkdtemp(join(tmpdir(), "simple-subagents-config-"));
+  const configPath = join(root, "simple-subagents.json");
+  await writeFile(configPath, JSON.stringify({
+    confirmWrites: true,
+    allowThinkingOverrides: true,
+  }));
+
+  const result = await loadConfig(configPath);
+
+  assert.deepEqual(result.config, {
+    confirmWrites: true,
+    allowThinkingOverrides: true,
+  });
+  assert.equal(result.warning, undefined);
+});
+
+test("invalid fields fail independently", async () => {
+  const root = await mkdtemp(join(tmpdir(), "simple-subagents-config-"));
+  const invalidConfirmPath = join(root, "invalid-confirm.json");
+  const invalidThinkingPath = join(root, "invalid-thinking.json");
+  await writeFile(invalidConfirmPath, JSON.stringify({
+    confirmWrites: "no",
+    allowThinkingOverrides: true,
+  }));
+  await writeFile(invalidThinkingPath, JSON.stringify({
+    confirmWrites: false,
+    allowThinkingOverrides: "yes",
+  }));
+
+  const invalidConfirm = await loadConfig(invalidConfirmPath);
+  assert.deepEqual(invalidConfirm.config, {
+    confirmWrites: true,
+    allowThinkingOverrides: true,
+  });
+  assert.match(invalidConfirm.warning ?? "", /confirmWrites/);
+
+  const invalidThinking = await loadConfig(invalidThinkingPath);
+  assert.deepEqual(invalidThinking.config, {
+    confirmWrites: false,
+    allowThinkingOverrides: false,
+  });
+  assert.match(invalidThinking.warning ?? "", /allowThinkingOverrides/);
 });
 
 test("config read failures other than missing file fail safe", async () => {
@@ -24,19 +72,11 @@ test("config read failures other than missing file fail safe", async () => {
 
   const result = await loadConfig(configPath);
 
-  assert.equal(result.config.confirmWrites, true);
+  assert.deepEqual(result.config, {
+    confirmWrites: true,
+    allowThinkingOverrides: false,
+  });
   assert.match(result.warning ?? "", /read|config/i);
-});
-
-test("valid confirmWrites is preserved", async () => {
-  const root = await mkdtemp(join(tmpdir(), "simple-subagents-config-"));
-  const configPath = join(root, "simple-subagents.json");
-  await writeFile(configPath, JSON.stringify({ confirmWrites: true }));
-
-  const result = await loadConfig(configPath);
-
-  assert.deepEqual(result.config, { confirmWrites: true });
-  assert.equal(result.warning, undefined);
 });
 
 test("invalid confirmWrites fails safe", async () => {
@@ -46,7 +86,10 @@ test("invalid confirmWrites fails safe", async () => {
 
   const result = await loadConfig(configPath);
 
-  assert.equal(result.config.confirmWrites, true);
+  assert.deepEqual(result.config, {
+    confirmWrites: true,
+    allowThinkingOverrides: false,
+  });
   assert.match(result.warning ?? "", /confirmWrites/);
 });
 
@@ -57,8 +100,25 @@ test("invalid json fails safe", async () => {
 
   const result = await loadConfig(configPath);
 
-  assert.equal(result.config.confirmWrites, true);
+  assert.deepEqual(result.config, {
+    confirmWrites: true,
+    allowThinkingOverrides: false,
+  });
   assert.match(result.warning ?? "", /JSON/);
+});
+
+test("invalid object roots fail safe", async () => {
+  const root = await mkdtemp(join(tmpdir(), "simple-subagents-config-"));
+  const configPath = join(root, "simple-subagents.json");
+  await writeFile(configPath, JSON.stringify([]));
+
+  const result = await loadConfig(configPath);
+
+  assert.deepEqual(result.config, {
+    confirmWrites: true,
+    allowThinkingOverrides: false,
+  });
+  assert.match(result.warning ?? "", /object/);
 });
 
 test("discovers generic and user markdown profiles", async () => {

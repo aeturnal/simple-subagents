@@ -658,7 +658,7 @@ test("extension clears the widget before manager shutdown", async () => {
   manager.shutdown = async () => { events.push("shutdown"); manager.shutdownCalls += 1; };
   createSimpleSubagentsExtension({
     createManager: () => manager as never,
-    loadConfig: async () => ({ config: { confirmWrites: false } }),
+    loadConfig: async () => ({ config: { confirmWrites: false, allowThinkingOverrides: false } }),
     discoverProfiles: async () => ({ agents: [], diagnostics: [] }),
   })(pi as never);
 
