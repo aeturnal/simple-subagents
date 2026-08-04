@@ -60,23 +60,20 @@ thinking: medium
 Return concise, line-referenced findings.
 ```
 
-### Per-job model and thinking
+### Per-job model and optional thinking
 
-A start task can temporarily override its child model and thinking level without changing the profile or parent session:
+Model overrides remain available by default. A start task can temporarily override its child model without changing the profile or parent session:
 
 ```json
 {
   "task": "Review the authentication changes",
   "agent": "reviewer",
   "writeAccess": false,
-  "model": "anthropic/claude-sonnet-4-5",
-  "thinkingLevel": "high"
+  "model": "anthropic/claude-sonnet-4-5"
 }
 ```
 
-Both fields are optional. The seven supported thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
-
-Thinking precedence is job `thinkingLevel`, then profile `thinking`, then the parent session, then Pi or the model default. Profile thinking is a default, not a lock: a job `thinkingLevel` overrides it. Model selection is job override, then profile, then parent session, then Pi's child default.
+Per-job thinking overrides are disabled by default. Normal thinking precedence is profile `thinking`, then the parent session, then Pi or the model default. This keeps the parent agent from increasing child reasoning on each launch.
 
 Model values are opaque Pi IDs or patterns. Thinking is passed separately through `--thinking`, not encoded in `--model`. Final model suffixes equal to a normalized thinking level are rejected in profile and job models; use the separate thinking field instead. `ollama/llama3.1:8b` remains valid. Pi performs provider translation and clamping, as well as pattern resolution, model availability, and provider credential checks.
 
@@ -89,8 +86,13 @@ A writable launch allowlist does not authorize a job to write. The parent must s
 Jobs are read-only by default. The parent model can explicitly request write access for a job; writable jobs may ask for confirmation through `~/.pi/agent/simple-subagents.json`:
 
 ```json
-{ "confirmWrites": false }
+{
+  "confirmWrites": false,
+  "allowThinkingOverrides": false
+}
 ```
+
+Set `allowThinkingOverrides` to `true` and run `/reload` when you intentionally want per-job control. The `subagent_start` task schema will then expose `thinkingLevel`, and precedence becomes job `thinkingLevel`, profile `thinking`, parent session, then Pi or the model default. Supported levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
 `confirmWrites` defaults to `false`. Even when write access is requested, give concurrent writers non-overlapping work: all subagents share the same workspace, so overlapping writes can conflict.
 
