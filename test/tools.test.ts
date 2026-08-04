@@ -868,6 +868,39 @@ test("registered tools expose strict schema boundaries and required guidance", (
   assert.match(pi.tools.get("subagent_wait")?.description ?? "", /at most 5 minutes/i);
 });
 
+const runtimeStartTool = async (allowThinkingOverrides: boolean) => {
+  const pi = new FakePi();
+  createSimpleSubagentsExtension({
+    loadConfig: async () => ({
+      config: { confirmWrites: false, allowThinkingOverrides },
+    }),
+    discoverProfiles: async () => ({
+      agents: [{ ...profile, name: "generic", source: "builtin" as const }],
+      diagnostics: [],
+    }),
+  })(pi as never);
+
+  assert.equal(pi.tools.has("subagent_start"), false);
+  await pi.emit("session_start", {}, fakeContext({ hasUI: true }, pi));
+  const start = pi.tools.get("subagent_start");
+  assert.ok(start);
+  return start;
+};
+
+test("runtime registers the disabled start schema after config loads", async () => {
+  const start = await runtimeStartTool(false);
+  assert.equal(Check(start.parameters, {
+    tasks: [{ task: "review", thinkingLevel: "high" }],
+  }), false);
+});
+
+test("runtime registers the enabled start schema after opt-in", async () => {
+  const start = await runtimeStartTool(true);
+  assert.equal(Check(start.parameters, {
+    tasks: [{ task: "review", thinkingLevel: "high" }],
+  }), true);
+});
+
 test("runtime does not register or emit automatic completion messages", async () => {
   const pi = new FakePi();
   const runner = new ControlledRunner();
