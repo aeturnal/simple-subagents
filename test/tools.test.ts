@@ -182,6 +182,30 @@ test("startJobs strips disabled overrides and preserves enabled overrides", asyn
   assert.equal(enabledResult.details.jobs[0]?.launchThinkingLevel, "low");
 });
 
+test("registered enabled start renders the job model and thinking override", async () => {
+  const pi = new FakePi();
+  const { services } = createServices();
+  registerSubagentTools(pi as never, services, true);
+  const start = pi.tools.get("subagent_start");
+  assert.ok(start);
+
+  const result = await start.execute(
+    "call",
+    { tasks: [{ task: "review enabled rendering", model: "ollama/llama3.1:8b", thinkingLevel: "low" }] },
+    undefined,
+    undefined,
+    {} as never,
+  );
+  const rendered = start.renderResult(
+    result,
+    { expanded: true },
+    { fg: (_color: string, value: string) => value },
+  ).render(160).join("\n");
+
+  assert.match(rendered, /Launch model: ollama\/llama3\.1:8b/);
+  assert.match(rendered, /Launch thinking: low \(job override\)/);
+});
+
 test("startJobs validates an over-eight batch without starting any jobs", async () => {
   const { services, runner } = createServices();
   const result = await startJobs({ tasks: Array.from({ length: 9 }, (_, index) => ({ task: `task ${index}` })) }, services, {} as never);
