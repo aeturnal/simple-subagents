@@ -5,6 +5,7 @@ import {
   AgentsParams,
   ControlParams,
   StartParams,
+  startParamsFor,
   StatusParams,
   WaitParams,
   controlJobs,
@@ -113,36 +114,72 @@ test("startJobs applies generic read-only defaults and reports every created ID"
   assert.match(text(result), /Started 2 jobs/);
   assert.deepEqual(result.details.jobs.map((job) => job.id), ["job-1", "job-2"]);
   assert.deepEqual(runner.started.map((entry) => entry.options.request), [
-    { task: "inspect this", agent: "generic", writeAccess: false, cwd: undefined, model: undefined, thinkingLevel: undefined },
-    { task: "review this", agent: "reviewer", writeAccess: false, cwd: "/other", model: undefined, thinkingLevel: undefined },
+    { task: "inspect this", agent: "generic", writeAccess: false, cwd: undefined, model: undefined },
+    { task: "review this", agent: "reviewer", writeAccess: false, cwd: "/other", model: undefined },
   ]);
 });
 
-test("startJobs forwards per-job overrides and renders launch selections immediately", async () => {
-  const { services, runner } = createServices();
-  const result = await startJobs({
-    tasks: [{ task: "review", agent: "reviewer", model: "ollama/llama3.1:8b", thinkingLevel: "low" }],
-  }, services, {} as never);
+test("start schema hides thinking overrides unless explicitly enabled", () => {
+  const disabled = startParamsFor(false);
+  const enabled = startParamsFor(true);
+  const overrideInput = {
+    tasks: [{ task: "review", thinkingLevel: "high" }],
+  };
 
-  assert.deepEqual(runner.started[0]?.options.request, {
-    task: "review",
+  assert.equal(Check(disabled, overrideInput), false);
+  assert.equal(Check(enabled, overrideInput), true);
+  assert.equal(Check(disabled, { tasks: [{ task: "review" }] }), true);
+
+  const disabledTask = disabled.properties.tasks.items as unknown as {
+    additionalProperties: boolean;
+    properties: Record<string, unknown>;
+  };
+  const enabledTask = enabled.properties.tasks.items as unknown as {
+    additionalProperties: boolean;
+    properties: Record<string, unknown>;
+  };
+  assert.equal(disabledTask.additionalProperties, false);
+  assert.equal(enabledTask.additionalProperties, false);
+  assert.equal("thinkingLevel" in disabledTask.properties, false);
+  assert.equal("thinkingLevel" in enabledTask.properties, true);
+});
+
+test("startJobs strips disabled overrides and preserves enabled overrides", async () => {
+  const disabled = createServices();
+  const injected = {
+    tasks: [{
+      task: "review disabled",
+      agent: "reviewer",
+      model: "ollama/llama3.1:8b",
+      thinkingLevel: "low" as const,
+    }],
+  };
+
+  const disabledResult = await startJobs(
+    injected,
+    disabled.services,
+    {} as never,
+  );
+  assert.deepEqual(disabled.runner.started[0]?.options.request, {
+    task: "review disabled",
     agent: "reviewer",
     writeAccess: false,
     cwd: undefined,
     model: "ollama/llama3.1:8b",
-    thinkingLevel: "low",
   });
-  assert.equal(result.details.jobs[0]?.launchModel, "ollama/llama3.1:8b");
+  assert.equal(disabledResult.details.jobs[0]?.launchThinkingSource, "parent");
+  assert.equal(disabledResult.details.jobs[0]?.launchThinkingLevel, "high");
 
-  const pi = new FakePi();
-  registerSubagentTools(pi as never, services);
-  const rendered = pi.tools.get("subagent_start")?.renderResult(
-    result,
-    { expanded: true },
-    { fg: (_color: string, value: string) => value },
-  ).render(160).join("\n") ?? "";
-  assert.match(rendered, /Launch model: ollama\/llama3\.1:8b/);
-  assert.match(rendered, /Launch thinking: low \(job override\)/);
+  const enabled = createServices();
+  const enabledResult = await startJobs(
+    { tasks: [{ ...injected.tasks[0], task: "review enabled" }] },
+    enabled.services,
+    {} as never,
+    true,
+  );
+  assert.equal(enabled.runner.started[0]?.options.request.thinkingLevel, "low");
+  assert.equal(enabledResult.details.jobs[0]?.launchThinkingSource, "job");
+  assert.equal(enabledResult.details.jobs[0]?.launchThinkingLevel, "low");
 });
 
 test("startJobs validates an over-eight batch without starting any jobs", async () => {
@@ -760,9 +797,9 @@ test("controlJobs propagates formatter failures", async () => {
 test("registered tools expose strict schema boundaries and required guidance", () => {
   const pi = new FakePi();
   const { services } = createServices();
-  registerSubagentTools(pi as never, services);
+  registerSubagentTools(pi as never, services, false);
 
-  const startSchema = StartParams as unknown as { properties: { tasks: { minItems: number; maxItems: number; items: { properties: { task: { minLength: number }; agent: { default: string }; writeAccess: { default: boolean }; model: { minLength: number; pattern: string }; thinkingLevel: { enum: string[] } } } } } };
+  const startSchema = StartParams as unknown as { properties: { tasks: { minItems: number; maxItems: number; items: { properties: { task: { minLength: number }; agent: { default: string }; writeAccess: { default: boolean }; model: { minLength: number; pattern: string } } } } } };
   const statusSchema = StatusParams as unknown as { properties: { id: { type: string } } };
   const controlSchema = ControlParams as unknown as { properties: { action: { enum: string[] }; ids: { minItems: number; maxItems: number } } };
   assert.equal(startSchema.properties.tasks.minItems, 1);
@@ -772,7 +809,6 @@ test("registered tools expose strict schema boundaries and required guidance", (
   assert.equal(startSchema.properties.tasks.items.properties.writeAccess.default, false);
   const taskProperties = startSchema.properties.tasks.items.properties;
   assert.equal(taskProperties.model.minLength, 1);
-  assert.deepEqual(taskProperties.thinkingLevel.enum, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
   assert.equal(new RegExp(taskProperties.model.pattern).test("ollama/llama3.1:8b"), true);
   assert.equal(new RegExp(taskProperties.model.pattern).test(" leading"), false);
   assert.equal(new RegExp(taskProperties.model.pattern).test("vendor/model\u0000name"), false);

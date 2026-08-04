@@ -11,18 +11,34 @@ import { THINKING_LEVELS, type AgentProfile, type Job, type JobRequest } from ".
 
 const MODEL_PATTERN = "^(?!\\s)(?![\\s\\S]*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f]+$";
 
-const StartTask = Type.Object({
+const StartTaskFields = {
   task: Type.String({ minLength: 1 }),
   agent: Type.Optional(Type.String({ default: "generic" })),
   writeAccess: Type.Optional(Type.Boolean({ default: false })),
   cwd: Type.Optional(Type.String()),
   model: Type.Optional(Type.String({ minLength: 1, pattern: MODEL_PATTERN })),
+};
+
+const DisabledStartTask = Type.Object(StartTaskFields, {
+  additionalProperties: false,
+});
+const EnabledStartTask = Type.Object({
+  ...StartTaskFields,
   thinkingLevel: Type.Optional(StringEnum(THINKING_LEVELS)),
+}, {
+  additionalProperties: false,
 });
 
-export const StartParams = Type.Object({
-  tasks: Type.Array(StartTask, { minItems: 1, maxItems: 8 }),
+const DisabledStartParams = Type.Object({
+  tasks: Type.Array(DisabledStartTask, { minItems: 1, maxItems: 8 }),
 });
+const EnabledStartParams = Type.Object({
+  tasks: Type.Array(EnabledStartTask, { minItems: 1, maxItems: 8 }),
+});
+
+export const StartParams = DisabledStartParams;
+export const startParamsFor = (allowThinkingOverrides: boolean) =>
+  allowThinkingOverrides ? EnabledStartParams : DisabledStartParams;
 export const AgentsParams = Type.Object({}, { additionalProperties: false });
 export const StatusParams = Type.Object({ id: Type.Optional(Type.String()) });
 export const ControlParams = Type.Object({
@@ -39,7 +55,7 @@ export const WaitParams = Type.Object({
   })),
 });
 
-export type StartInput = Static<typeof StartParams>;
+export type StartInput = Static<typeof EnabledStartParams>;
 export type AgentsInput = Static<typeof AgentsParams>;
 export type StatusInput = Static<typeof StatusParams>;
 export type ControlInput = Static<typeof ControlParams>;
@@ -89,13 +105,18 @@ const response = (
   details: { jobs: [...jobs], diagnostics, operation },
 });
 
-const toRequest = (task: StartInput["tasks"][number]): JobRequest => ({
+const toRequest = (
+  task: StartInput["tasks"][number],
+  allowThinkingOverrides: boolean,
+): JobRequest => ({
   task: task.task,
   agent: task.agent ?? "generic",
   writeAccess: task.writeAccess ?? false,
   cwd: task.cwd,
   model: task.model,
-  thinkingLevel: task.thinkingLevel,
+  ...(allowThinkingOverrides && task.thinkingLevel !== undefined
+    ? { thinkingLevel: task.thinkingLevel }
+    : {}),
 });
 
 const summary = (jobs: readonly Job[]): string => jobs.map((job) => `${job.id} (${job.state})`).join(", ");
@@ -115,10 +136,15 @@ export async function listAgents(services: ToolServices): Promise<AgentsToolResp
   };
 }
 
-export async function startJobs(input: StartInput, services: ToolServices, ctx: ExtensionContext): Promise<ToolResponse & { details: ToolDetails }> {
+export async function startJobs(
+  input: StartInput,
+  services: ToolServices,
+  ctx: ExtensionContext,
+  allowThinkingOverrides = false,
+): Promise<ToolResponse & { details: ToolDetails }> {
   if (input.tasks.length > 8) return response("A start batch accepts at most 8 jobs.", [], ["A start batch accepts at most 8 jobs."], "start");
 
-  const requests = input.tasks.map(toRequest);
+  const requests = input.tasks.map((task) => toRequest(task, allowThinkingOverrides));
   const profiles = await services.getProfiles();
   const unknown = requests.find((request) => !profiles.has(request.agent));
   if (unknown) {
@@ -328,7 +354,11 @@ const renderToolResult = (result: ToolResponse, expanded: boolean, theme: { fg(c
   return theme.fg("muted", [compact, detail].filter(Boolean).join("\n\n"));
 };
 
-export function registerSubagentTools(pi: ExtensionAPI, services: ToolServices): void {
+export function registerSubagentTools(
+  pi: ExtensionAPI,
+  services: ToolServices,
+  allowThinkingOverrides = false,
+): void {
   pi.registerTool({
     name: "subagent_agents",
     label: "Subagent Profiles",
@@ -343,8 +373,8 @@ export function registerSubagentTools(pi: ExtensionAPI, services: ToolServices):
     name: "subagent_start",
     label: "Start Subagents",
     description,
-    parameters: StartParams,
-    execute: async (_id, input, _signal, _update, ctx) => startJobs(input, services, ctx),
+    parameters: startParamsFor(allowThinkingOverrides),
+    execute: async (_id, input, _signal, _update, ctx) => startJobs(input, services, ctx, allowThinkingOverrides),
     renderCall: (input, theme) => new Text(theme.fg("toolTitle", `subagent_start ${input.tasks.length} job${input.tasks.length === 1 ? "" : "s"}`), 0, 0),
     renderResult: (result, { expanded }, theme) => new Text(renderToolResult(result as ToolResponse & { details: ToolDetails }, expanded, theme), 0, 0),
   });
