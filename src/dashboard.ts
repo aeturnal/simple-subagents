@@ -48,7 +48,6 @@ const renderFingerprint = (jobs: readonly Job[]): string => JSON.stringify(jobs.
   errorTruncation: job.errorTruncation,
   truncation: job.truncation,
   malformedEventCount: job.malformedEventCount,
-  malformedEventSamples: job.malformedEventSamples,
 })));
 
 const durationText = (durationMs: number): string => {
@@ -247,8 +246,7 @@ export class SubagentsDashboard implements Component {
     const activity = status.recentActivity.length === 0
       ? labeledField("Recent activity", "No activity reported yet")
       : status.recentActivity.flatMap((item) => labeledField("Recent activity", `${new Date(item.timestamp).toISOString()} ${item.kind}: ${item.summary}`));
-    const malformedSamples = job.malformedEventSamples ?? [];
-    const malformed = `${job.malformedEventCount} malformed protocol event${job.malformedEventCount === 1 ? "" : "s"}.\n${malformedSamples.length ? malformedSamples.join("\n") : "No malformed protocol samples."}`;
+    const malformed = `${job.malformedEventCount} malformed protocol event${job.malformedEventCount === 1 ? "" : "s"}.`;
     const progress = job.progress.length
       ? job.progress.map((item) => `${new Date(item.timestamp).toISOString()} ${item.type}: ${item.text}`).join("\n")
       : "No activity reported yet.";

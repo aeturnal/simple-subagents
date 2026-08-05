@@ -312,7 +312,6 @@ test("statusJobs groups a bounded list without captured output", async () => {
     errorMessage: "PRIVATE_ERROR",
     usage: usage(),
     malformedEventCount: 1,
-    malformedEventSamples: ["PRIVATE_MALFORMED"],
     launchThinkingSource: "parent",
   }));
   let clockReads = 0;

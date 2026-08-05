@@ -71,7 +71,6 @@ export interface Job {
   errorMessage?: string;
   errorTruncation?: TextTruncation;
   malformedEventCount: number;
-  malformedEventSamples?: string[];
   outputTruncation?: TextTruncation;
   stderrTruncation?: TextTruncation;
   /** @deprecated Use outputTruncation for producer capture metadata. */

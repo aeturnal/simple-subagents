@@ -196,7 +196,6 @@ test("compact details use shared status facts and exclude raw captures", (t) => 
     output: "SECRET_OUTPUT_DO_NOT_SHOW",
     stderr: "SECRET_STDERR_DO_NOT_SHOW",
     errorMessage: "SECRET_ERROR_DO_NOT_SHOW",
-    malformedEventSamples: ["SECRET_MALFORMED_SAMPLE_DO_NOT_SHOW"],
     outputTruncation: { originalBytes: 1_000, keptBytes: 500 },
     progress: [
       { type: "text", text: "Completed safe status update", timestamp: 2_500 },
@@ -215,7 +214,7 @@ test("compact details use shared status facts and exclude raw captures", (t) => 
   for (const label of ["Task:", "Agent:", "Access:", "Launch model:", "Reported model:", "Created:", "Queue:", "Run:", "Usage:", "Recent activity:"]) {
     assert.match(text, new RegExp(label));
   }
-  for (const secret of ["SECRET_OUTPUT_DO_NOT_SHOW", "SECRET_STDERR_DO_NOT_SHOW", "SECRET_ERROR_DO_NOT_SHOW", "SECRET_MALFORMED_SAMPLE_DO_NOT_SHOW"]) {
+  for (const secret of ["SECRET_OUTPUT_DO_NOT_SHOW", "SECRET_STDERR_DO_NOT_SHOW", "SECRET_ERROR_DO_NOT_SHOW"]) {
     assert.doesNotMatch(text, new RegExp(secret));
   }
   assert.match(text, /enter inspect/);
@@ -225,13 +224,15 @@ test("compact details use shared status facts and exclude raw captures", (t) => 
 test("full metadata viewport is bounded by rows and width while showing raw captures only in full view", (t) => {
   const pi = new FakePi();
   pi.ui.rows = 10;
-  const view = dashboard(new FakeManager([job("job-1", "completed", {
+  const legacyJob = job("job-1", "failed", {
     output: "SECRET_OUTPUT_DO_NOT_SHOW",
     stderr: "SECRET_STDERR_DO_NOT_SHOW",
     errorMessage: "SECRET_ERROR_DO_NOT_SHOW",
-    malformedEventSamples: ["SECRET_MALFORMED_SAMPLE_DO_NOT_SHOW"],
+    malformedEventCount: 1,
     outputTruncation: { originalBytes: 1_000, keptBytes: 500 },
-  })]), pi);
+  }) as Job & { malformedEventSamples: string[] };
+  legacyJob.malformedEventSamples = ["PRIVATE_REASONING_TEXT_MUST_NOT_SURVIVE"];
+  const view = dashboard(new FakeManager([legacyJob]), pi);
   t.after(() => view.dispose());
 
   view.handleInput?.("v");
@@ -243,6 +244,9 @@ test("full metadata viewport is bounded by rows and width while showing raw capt
   assert.equal(plain(lines[0] ?? ""), "Subagent job-1 · full view");
   assert.match(plain(lines.at(-1) ?? ""), /^lines \d+–\d+ of \d+ · ↑↓ line · PgUp\/PgDn page · Home\/End · v\/esc back$/);
   assert.match(text, /SECRET_OUTPUT_DO_NOT_SHOW/);
+  assert.match(text, /Malformed: 1 malformed protocol/u);
+  assert.match(text, /event\./u);
+  assert.doesNotMatch(text, /malformed protocol samples|PRIVATE_REASONING_TEXT_MUST_NOT_SURVIVE/ui);
   for (const width of [24, 60, 120]) for (const line of view.render(width)) assert.ok(visibleWidth(line) <= width, `${visibleWidth(line)} > ${width}: ${line}`);
 });
 
@@ -277,7 +281,6 @@ test("full view strips cursor controls from captured sections", (t) => {
     stderr: hostile,
     errorMessage: hostile,
     malformedEventCount: 1,
-    malformedEventSamples: [hostile],
     progress: [{ type: "text", text: hostile, timestamp: 2_500 }],
   })]), pi);
   t.after(() => view.dispose());
