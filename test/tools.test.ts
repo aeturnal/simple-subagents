@@ -564,6 +564,32 @@ test("controlJobs discards multiple completed jobs without placing output into m
   assert.doesNotMatch(text(result), /do not surface/);
 });
 
+test("start renderer reads bounded task detail from a legacy persisted job", async () => {
+  const pi = new FakePi();
+  const { services } = createServices();
+  registerSubagentTools(pi as never, services);
+  const started = await startJobs({ tasks: [{ task: "current task" }] }, services, {} as never);
+  const legacyJob = services.manager.get("job-1");
+  assert.ok(legacyJob);
+  const legacyTask = `legacy persisted task\u001b[2J ${"x".repeat(2_000)}`;
+  const legacyResult = {
+    content: started.content,
+    details: {
+      ...started.details,
+      jobs: [{ ...legacyJob, request: { ...legacyJob.request, task: legacyTask } }],
+    },
+  };
+
+  const rendered = pi.tools.get("subagent_start")?.renderResult(
+    legacyResult,
+    { expanded: true },
+    { fg: (_color: string, value: string) => value },
+  ).render(160).join("\n") ?? "";
+
+  assert.match(rendered, /legacy persisted task/u);
+  assert.doesNotMatch(rendered, /undefined|\u001b|x{161}/u);
+});
+
 test("tool renderers preserve task detail when expanded and keep compact control outcomes concise", async () => {
   const pi = new FakePi();
   const { services, runner } = createServices();

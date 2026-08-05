@@ -328,7 +328,7 @@ const renderAgentProfiles = (
   return theme.fg("muted", [compact, detail].filter(Boolean).join("\n\n"));
 };
 
-const launchThinking = (job: PublicJobDetail): string => {
+const launchThinking = (job: Pick<PublicJobDetail, "launchThinkingLevel" | "launchThinkingSource">): string => {
   if (job.launchThinkingLevel) {
     const source = job.launchThinkingSource === "job" ? "job override"
       : job.launchThinkingSource === "parent" ? "parent session"
@@ -338,8 +338,8 @@ const launchThinking = (job: PublicJobDetail): string => {
   return job.launchThinkingSource === "legacy" ? "legacy profile/parent behavior" : "model or Pi default";
 };
 
-const launchDetail = (job: PublicJobDetail): string => [
-  `  ${job.task}`,
+const launchDetail = (job: PublicJobDetail | Readonly<Job>): string => [
+  `  ${"task" in job ? job.task : boundedPreview(job.request.task)}`,
   `  Launch model: ${job.launchModel ?? "Pi default"}`,
   `  Launch thinking: ${launchThinking(job)}`,
 ].join("\n");
