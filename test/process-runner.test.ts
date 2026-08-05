@@ -5,7 +5,7 @@ import test from "node:test";
 import { resolveLaunchOptions } from "../src/launch-options.ts";
 import { CAPTURED_TEXT_MAX_BYTES } from "../src/output.ts";
 import { getLaunchToolAllowlist } from "../src/profile-capabilities.ts";
-import { PiProcessRunner, type ProcessRunOptions } from "../src/process-runner.ts";
+import { PiProcessRunner, type ProcessRunOptions, type ProcessTelemetry } from "../src/process-runner.ts";
 import type { AgentProfile, JobRequest, ProgressItem } from "../src/types.ts";
 
 class FakeChildProcess extends EventEmitter {
@@ -46,6 +46,7 @@ const runOptions = (overrides: Partial<ProcessRunOptions> = {}): ProcessRunOptio
     profile: nextProfile,
     launchOptions: overrides.launchOptions ?? resolveLaunchOptions(nextRequest, nextProfile, {}),
     onProgress: overrides.onProgress ?? (() => {}),
+    ...(overrides.onTelemetry ? { onTelemetry: overrides.onTelemetry } : {}),
   };
 };
 
@@ -331,6 +332,52 @@ test("reduces split assistant events into final output and accumulated usage", a
   assert.equal(progress.length, 1);
   assert.equal(progress[0]?.type, "tool");
   assert.match(progress[0]?.text ?? "", /read/);
+});
+
+test("emits accumulated telemetry after each assistant message", async () => {
+  const { child, runner } = spawnedRunner();
+  const telemetry: ProcessTelemetry[] = [];
+  const running = runner.run(runOptions({
+    onTelemetry: (update) => telemetry.push(update),
+  }));
+  const emit = (event: unknown): void => {
+    child.stdout.emit("data", Buffer.from(`${JSON.stringify(event)}\n`));
+  };
+
+  emit({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      usage: { input: 3, output: 5, cacheRead: 7, cacheWrite: 11, cost: { total: 0.25 } },
+      model: "openai-codex/gpt-5.6-terra",
+    },
+  });
+  emit({ type: "message_update", message: { role: "assistant" }, assistantMessageEvent: { type: "text_delta", delta: "x" } });
+  emit({ type: "message_update", message: { role: "assistant" }, assistantMessageEvent: { type: "thinking_delta", delta: "secret" } });
+  emit({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      usage: { input: 13, output: 17 },
+      model: "openai-codex/gpt-5.6-sol",
+    },
+  });
+
+  assert.deepEqual(telemetry, [
+    {
+      usage: { input: 3, output: 5, cacheRead: 7, cacheWrite: 11, cost: 0.25, turns: 1 },
+      model: "openai-codex/gpt-5.6-terra",
+    },
+    {
+      usage: { input: 16, output: 22, cacheRead: 7, cacheWrite: 11, cost: 0.25, turns: 2 },
+      model: "openai-codex/gpt-5.6-sol",
+    },
+  ]);
+
+  child.close();
+  const result = await running.result;
+  assert.deepEqual(result.usage, telemetry.at(-1)?.usage);
+  assert.equal(result.model, telemetry.at(-1)?.model);
 });
 
 test("reduces split Pi text_delta updates into bounded latest text progress", async () => {

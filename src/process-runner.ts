@@ -9,12 +9,18 @@ import { getLaunchToolAllowlist } from "./profile-capabilities.js";
 import { CAPTURED_TEXT_MAX_BYTES, truncateUtf8 } from "./output.js";
 import type { AgentProfile, JobRequest, ProgressItem, TextTruncation, UsageStats } from "./types.js";
 
+export interface ProcessTelemetry {
+  readonly usage: Readonly<UsageStats>;
+  readonly model?: string;
+}
+
 export interface ProcessRunOptions {
   cwd: string;
   request: JobRequest;
   profile: AgentProfile;
   launchOptions: LaunchOptions;
   onProgress(item: ProgressItem): void;
+  onTelemetry?(telemetry: ProcessTelemetry): void;
 }
 
 export interface ProcessResult {
@@ -295,7 +301,12 @@ export class PiProcessRunner implements ProcessRunner {
           const cost = asRecord(eventUsage.cost);
           usage.cost += cost ? asNumber(cost.total) : asNumber(eventUsage.cost);
         }
-        resultModel = asString(message.model) ?? resultModel;
+        const reportedModel = asString(message.model);
+        resultModel = reportedModel ?? resultModel;
+        options.onTelemetry?.({
+          usage: { ...usage },
+          ...(reportedModel === undefined ? {} : { model: reportedModel }),
+        });
         stopReason = asString(message.stopReason) ?? stopReason;
         const nextErrorMessage = asString(message.errorMessage);
         if (nextErrorMessage !== undefined) setError(nextErrorMessage);
