@@ -413,7 +413,7 @@ export class JobManager {
   }
 
   private applyTelemetry(entry: InternalJob, telemetry: ProcessTelemetry): void {
-    if (entry.job.state !== "running") return;
+    if (!this.active.has(entry.job.id) || (entry.job.state !== "running" && entry.job.state !== "cancelled")) return;
     entry.job.usage = structuredClone(telemetry.usage);
     if (telemetry.model !== undefined) entry.job.model = telemetry.model;
     this.notify();

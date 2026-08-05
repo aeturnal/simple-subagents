@@ -368,6 +368,42 @@ test("final result overrides live telemetry and late telemetry is ignored", asyn
   assert.equal(manager.get("job-1")?.model, "test-model");
 });
 
+test("accepts telemetry while cancelled work awaits settlement and ignores it afterward", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  manager.enqueue(makeRequests(1), profiles, defaults);
+  let notifications = 0;
+  manager.subscribe(() => { notifications += 1; });
+
+  const cancelling = manager.cancel("job-1");
+  runner.releaseCancel(0);
+  await cancelling;
+  assert.equal(manager.get("job-1")?.state, "cancelled");
+
+  const beforeLiveTelemetry = notifications;
+  runner.telemetry(0, {
+    usage: { input: 7, output: 11, cacheRead: 2, cacheWrite: 3, cost: 0.4, turns: 1 },
+    model: "cancelled-live-model",
+  });
+  assert.deepEqual(manager.get("job-1")?.usage, {
+    input: 7, output: 11, cacheRead: 2, cacheWrite: 3, cost: 0.4, turns: 1,
+  });
+  assert.equal(manager.get("job-1")?.model, "cancelled-live-model");
+  assert.equal(notifications, beforeLiveTelemetry + 1);
+
+  runner.complete(0, successfulResult("late result"));
+  await runner.flush();
+  const afterSettlement = notifications;
+  runner.telemetry(0, {
+    usage: { input: 999, output: 999, cacheRead: 0, cacheWrite: 0, cost: 9, turns: 9 },
+    model: "too-late-model",
+  });
+
+  assert.deepEqual(manager.get("job-1")?.usage, usage());
+  assert.equal(manager.get("job-1")?.model, "test-model");
+  assert.equal(notifications, afterSettlement);
+});
+
 test("keeps launch model when Pi later reports a different resolved model", async () => {
   const runner = new ControlledRunner();
   const manager = new JobManager({ runner });
