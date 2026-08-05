@@ -630,7 +630,7 @@ test("settles error and close exactly once while cleaning listeners and cancella
   assert.equal(child.stderr.listenerCount("data"), 0);
 });
 
-test("bounds captured output, stderr, assistant errors, and malformed samples before returning a result", async () => {
+test("bounds captured output, stderr, and assistant errors without returning malformed text", async () => {
   const { child, runner } = spawnedRunner();
   const running = runner.run(runOptions({ cwd: "/workspace", request: request(), profile: profile({ systemPrompt: "" }), onProgress() {} }));
   const oversized = "😀".repeat(15_000);
@@ -644,13 +644,15 @@ test("bounds captured output, stderr, assistant errors, and malformed samples be
   child.close(1);
 
   const result = await running.result;
-  for (const text of [result.output, result.stderr, result.errorMessage ?? "", ...(result.malformedEventSamples ?? [])]) {
+  for (const text of [result.output, result.stderr, result.errorMessage ?? ""]) {
     assert.ok(Buffer.byteLength(text, "utf8") <= 50 * 1024);
     assert.doesNotMatch(text, /\uFFFD/);
   }
   assert.ok(result.outputTruncation);
   assert.ok(result.stderrTruncation);
-  assert.ok((result.malformedEventSamples?.length ?? 0) > 0);
+  assert.equal(result.malformedEventCount, 1);
+  assert.equal("malformedEventSamples" in result, false);
+  assert.doesNotMatch(JSON.stringify(result), /not-json-/u);
 });
 
 test("cancellation sends SIGTERM then SIGKILL after five seconds unless the process closes", async () => {

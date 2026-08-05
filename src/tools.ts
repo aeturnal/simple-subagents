@@ -4,10 +4,25 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { JobManager, type WaitJobStatus, type WaitResult, type WaitUntil } from "./job-manager.js";
 import { decideJobControl } from "./job-lifecycle.js";
-import { formatJobStatusList, formatSingleJobStatus, projectJobStatus, selectStatusList, type JobStatus } from "./job-status.js";
+import {
+  boundedPreview,
+  formatJobStatusList,
+  formatSingleJobStatus,
+  projectJobStatus,
+  selectStatusList,
+  type JobStatus,
+} from "./job-status.js";
 import { capCollectedPayload, formatCollectedResult } from "./output.js";
 import { buildPublicAgentDiscovery, formatUnknownProfileDiagnostic, type PublicAgentProfile } from "./profile-discovery.js";
-import { THINKING_LEVELS, type AgentProfile, type Job, type JobRequest } from "./types.js";
+import {
+  THINKING_LEVELS,
+  type AgentProfile,
+  type Job,
+  type JobRequest,
+  type JobState,
+  type LaunchThinkingSource,
+  type ThinkingLevel,
+} from "./types.js";
 
 const MODEL_PATTERN = "^(?!\\s)(?![\\s\\S]*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f]+$";
 
@@ -69,8 +84,26 @@ export interface ToolServices {
   defaults(ctx: ExtensionContext): { cwd: string; parentModel?: string; thinkingLevel?: string };
 }
 
+export interface PublicJobDetail {
+  id: string;
+  state: JobState;
+  task: string;
+  launchModel?: string;
+  launchThinkingLevel?: ThinkingLevel;
+  launchThinkingSource?: LaunchThinkingSource;
+}
+
+const toPublicJobDetail = (job: Readonly<Job>): PublicJobDetail => ({
+  id: boundedPreview(job.id),
+  state: job.state,
+  task: boundedPreview(job.request.task),
+  ...(job.launchModel ? { launchModel: boundedPreview(job.launchModel) } : {}),
+  ...(job.launchThinkingLevel ? { launchThinkingLevel: job.launchThinkingLevel } : {}),
+  ...(job.launchThinkingSource ? { launchThinkingSource: job.launchThinkingSource } : {}),
+});
+
 export interface ToolDetails {
-  jobs: Job[];
+  jobs: PublicJobDetail[];
   diagnostics: string[];
   operation?: "agents" | "start" | "status" | "wait" | "cancel" | "collect" | "discard";
   profiles?: PublicAgentProfile[];
@@ -102,7 +135,7 @@ const response = (
   operation?: ToolDetails["operation"],
 ): ToolResponse & { details: ToolDetails } => ({
   content: [{ type: "text", text: content }],
-  details: { jobs: [...jobs], diagnostics, operation },
+  details: { jobs: jobs.map(toPublicJobDetail), diagnostics, operation },
 });
 
 const toRequest = (
@@ -174,7 +207,7 @@ export async function statusJobs(input: StatusInput, services: ToolServices): Pr
     const status = projectJobStatus(job, now);
     return {
       content: [{ type: "text", text: formatSingleJobStatus(status, now) }],
-      details: { jobs: [job], statuses: [status], diagnostics: [], operation: "status" },
+      details: { jobs: [toPublicJobDetail(job)], statuses: [status], diagnostics: [], operation: "status" },
     };
   }
 
@@ -183,7 +216,7 @@ export async function statusJobs(input: StatusInput, services: ToolServices): Pr
   return {
     content: [{ type: "text", text: formatJobStatusList(selected, now) }],
     details: {
-      jobs: [...jobs],
+      jobs: detailJobsForStatuses(jobs, selected.statuses),
       statuses: selected.statuses,
       omittedStatuses: selected.omitted,
       diagnostics: [],
@@ -191,6 +224,14 @@ export async function statusJobs(input: StatusInput, services: ToolServices): Pr
     },
   };
 }
+
+const detailJobsForStatuses = (jobs: readonly Job[], statuses: readonly JobStatus[]): PublicJobDetail[] => {
+  const jobsById = new Map(jobs.map((job) => [job.id, job]));
+  return statuses.flatMap((status) => {
+    const job = jobsById.get(status.id);
+    return job ? [toPublicJobDetail(job)] : [];
+  });
+};
 
 const waitSummary = (jobs: readonly WaitJobStatus[]): string =>
   jobs.map((job) => `${job.id} (${job.state})`).join(", ");
@@ -266,7 +307,7 @@ const description = [
   "Concurrent writable jobs should receive non-overlapping work.",
 ].join(" ");
 
-const iconForState = (state: Job["state"]): string => {
+const iconForState = (state: JobState): string => {
   if (state === "completed") return "✓";
   if (state === "failed" || state === "cancelled") return "✗";
   if (state === "collected") return "↳";
@@ -314,7 +355,7 @@ const renderAgentProfiles = (
   return theme.fg("muted", [compact, detail].filter(Boolean).join("\n\n"));
 };
 
-const launchThinking = (job: Job): string => {
+const launchThinking = (job: Pick<PublicJobDetail, "launchThinkingLevel" | "launchThinkingSource">): string => {
   const source = job.launchThinkingSource === "job" ? "job override"
     : job.launchThinkingSource === "profile" ? "profile"
       : job.launchThinkingSource === "parent" ? "parent session"
@@ -322,8 +363,8 @@ const launchThinking = (job: Job): string => {
   return job.launchThinkingLevel ? `${job.launchThinkingLevel} (${source})` : source;
 };
 
-const launchDetail = (job: Job): string => [
-  `  ${job.request.task}`,
+const launchDetail = (job: PublicJobDetail | Readonly<Job>): string => [
+  `  ${"task" in job ? job.task : boundedPreview(job.request.task)}`,
   `  Launch model: ${job.launchModel ?? "Pi default"}`,
   `  Launch thinking: ${launchThinking(job)}`,
 ].join("\n");

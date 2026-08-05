@@ -33,7 +33,6 @@ const job = (state: JobState, overrides: Partial<Job> = {}): Job => ({
   stderr: "secret stderr",
   errorMessage: "secret error",
   malformedEventCount: 1,
-  malformedEventSamples: ["secret malformed sample"],
   usage: { input: 1_000, output: 500, cacheRead: 20, cacheWrite: 10, cost: 0.25, turns: 3 },
   ...overrides,
 });

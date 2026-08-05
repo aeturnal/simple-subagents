@@ -1,18 +1,13 @@
 import { StringDecoder } from "node:string_decoder";
-import { CAPTURED_TEXT_MAX_BYTES, MALFORMED_EVENT_SAMPLE_MAX_BYTES, truncateUtf8 } from "./output.ts";
+import { CAPTURED_TEXT_MAX_BYTES } from "./output.ts";
 
 export class JsonLineParser {
   private decoder = new StringDecoder("utf8");
   private pending = "";
   private _malformedCount = 0;
-  private readonly _malformedSamples: string[] = [];
 
   get malformedCount(): number {
     return this._malformedCount;
-  }
-
-  get malformedSamples(): readonly string[] {
-    return this._malformedSamples;
   }
 
   push(chunk: Buffer): unknown[] {
@@ -31,7 +26,7 @@ export class JsonLineParser {
     const results = records.flatMap((record) => this.parse(record));
     if (!oversizedPending) return results;
 
-    const oversizedMalformed = this.malformed(pending);
+    const oversizedMalformed = this.malformed();
     this.pending = "";
     this.decoder = new StringDecoder("utf8");
     return [...results, ...oversizedMalformed];
@@ -44,15 +39,12 @@ export class JsonLineParser {
     try {
       return [JSON.parse(line) as unknown];
     } catch {
-      return this.malformed(line);
+      return this.malformed();
     }
   }
 
-  private malformed(line: string): unknown[] {
+  private malformed(): unknown[] {
     this._malformedCount += 1;
-    if (this._malformedSamples.length < 3) {
-      this._malformedSamples.push(truncateUtf8(line, MALFORMED_EVENT_SAMPLE_MAX_BYTES).text);
-    }
     return [];
   }
 }

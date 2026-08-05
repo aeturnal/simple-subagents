@@ -4,7 +4,6 @@ import { JsonLineParser } from "../src/json-stream.ts";
 import {
   CAPTURED_TEXT_MAX_BYTES,
   COLLECTED_OUTPUT_MAX_BYTES,
-  MALFORMED_EVENT_SAMPLE_MAX_BYTES,
   formatCollectedResult,
   truncateUtf8,
 } from "../src/output.ts";
@@ -50,27 +49,19 @@ test("ignores blank records and only treats LF as a record boundary", () => {
 
   assert.deepEqual(parser.push(Buffer.from("\n\r\n{\"first\":true}\r{\"second\":true}\n")), []);
   assert.equal(parser.malformedCount, 1);
-  assert.deepEqual(parser.malformedSamples, ['{"first":true}\r{"second":true}']);
 });
 
-test("counts malformed records and retains three 500-character samples", () => {
+test("counts malformed reasoning records without retaining their text", () => {
   const parser = new JsonLineParser();
-  const oversized = "x".repeat(501);
+  const secret = "PRIVATE_REASONING_TEXT_MUST_NOT_SURVIVE";
 
-  assert.deepEqual(parser.push(Buffer.from(`bad\n${oversized}\nthird\nfourth\n`)), []);
-  assert.equal(parser.malformedCount, 4);
-  assert.deepEqual(parser.malformedSamples, ["bad", "x".repeat(500), "third"]);
-});
-
-test("bounds malformed samples at a UTF-8-safe byte limit", () => {
-  const parser = new JsonLineParser();
-
-  parser.push(Buffer.from(`${"😀".repeat(200)}\n`));
-
-  assert.equal(CAPTURED_TEXT_MAX_BYTES, 50 * 1024);
-  assert.equal(MALFORMED_EVENT_SAMPLE_MAX_BYTES, 500);
-  assert.ok(Buffer.byteLength(parser.malformedSamples[0] ?? "", "utf8") <= MALFORMED_EVENT_SAMPLE_MAX_BYTES);
-  assert.doesNotMatch(parser.malformedSamples[0] ?? "", /\uFFFD/);
+  assert.deepEqual(
+    parser.push(Buffer.from(`{"type":"reasoning","reasoning":"${secret}"\n`)),
+    [],
+  );
+  assert.equal(parser.malformedCount, 1);
+  assert.equal("malformedSamples" in parser, false);
+  assert.doesNotMatch(JSON.stringify(parser), new RegExp(secret, "u"));
 });
 
 test("parses a final unterminated record when finished", () => {
@@ -88,9 +79,6 @@ test("drops an oversized unterminated malformed record before finish and recover
 
   assert.equal(parser.malformedCount, 1);
   assert.equal((parser as unknown as { pending: string }).pending, "");
-  assert.equal(parser.malformedSamples.length, 1);
-  assert.ok(Buffer.byteLength(parser.malformedSamples[0] ?? "", "utf8") <= MALFORMED_EVENT_SAMPLE_MAX_BYTES);
-  assert.doesNotMatch(parser.malformedSamples[0] ?? "", /\uFFFD/);
   assert.deepEqual(parser.push(Buffer.from('{"recovered":true}\n')), [{ recovered: true }]);
   assert.deepEqual(parser.finish(), []);
   assert.equal(parser.malformedCount, 1);
@@ -202,7 +190,7 @@ test("keeps launch selection beside Pi unavailable-model diagnostics", () => {
 });
 
 test("formats model, usage, and independent actionable diagnostics", () => {
-  const formatted = formatCollectedResult(job({
+  const legacyJob = job({
     state: "failed",
     model: "openai/gpt-5",
     usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: 0.5, turns: 6 },
@@ -210,10 +198,11 @@ test("formats model, usage, and independent actionable diagnostics", () => {
     stderr: "stderr warning",
     errorMessage: "assistant error",
     malformedEventCount: 2,
-    malformedEventSamples: ["bad event"],
     outputTruncation: { originalBytes: 60_000, keptBytes: 50 * 1024 },
     stderrTruncation: { originalBytes: 70_000, keptBytes: 50 * 1024 },
-  }));
+  }) as Job & { malformedEventSamples: string[] };
+  legacyJob.malformedEventSamples = ["PRIVATE_REASONING_TEXT_MUST_NOT_SURVIVE"];
+  const formatted = formatCollectedResult(legacyJob);
 
   for (const expected of [
     "- Reported model: openai/gpt-5",
@@ -222,8 +211,9 @@ test("formats model, usage, and independent actionable diagnostics", () => {
     "Stderr capture truncated: retained 51200 of 70000 bytes.",
     "Error:\nassistant error",
     "Malformed events: 2",
-    "- bad event",
   ]) assert.match(formatted, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(formatted, /Malformed events: 2/u);
+  assert.doesNotMatch(formatted, /Malformed samples|PRIVATE_REASONING_TEXT_MUST_NOT_SURVIVE/u);
 });
 
 test("keeps capture notices before oversized completed task and result bodies", () => {
@@ -271,7 +261,7 @@ test("formats failed results with output, stderr, and truncation diagnostics", (
         truncation: { originalBytes: 60000, keptBytes: 51200 },
       }),
     ),
-    "# Subagent result: job-42\n\n## Capture limits\nOutput capture truncated: retained 51200 of 60000 bytes.\n\nPartial output:\nnone\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n- Usage: input 0, output 0, cache read 0, cache write 0, cost 0, turns 0\n\n## Diagnostics\n\nOutput:\nPartial answer\n\nStderr:\nprocess exited 1\n\nError:\nnone\n\nMalformed events: 0\nMalformed samples:\nnone",
+    "# Subagent result: job-42\n\n## Capture limits\nOutput capture truncated: retained 51200 of 60000 bytes.\n\nPartial output:\nnone\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n- Usage: input 0, output 0, cache read 0, cache write 0, cost 0, turns 0\n\n## Diagnostics\n\nOutput:\nPartial answer\n\nStderr:\nprocess exited 1\n\nError:\nnone\n\nMalformed events: 0",
   );
 });
 
@@ -294,7 +284,7 @@ test("caps failed diagnostics without duplicating output and reports formatted-p
     }),
   );
   const notice = /\n\nOutput truncated: retained (\d+) of (\d+) bytes\.$/.exec(formatted);
-  const completeContent = `# Subagent result: job-42\n\n## Capture limits\nOutput capture truncated: retained 60000 of 100000 bytes.\n\nPartial output:\nnone\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n- Usage: input 0, output 0, cache read 0, cache write 0, cost 0, turns 0\n\n## Diagnostics\n\nOutput:\n${output}\n\nStderr:\n${stderr}\n\nError:\nnone\n\nMalformed events: 0\nMalformed samples:\nnone`;
+  const completeContent = `# Subagent result: job-42\n\n## Capture limits\nOutput capture truncated: retained 60000 of 100000 bytes.\n\nPartial output:\nnone\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n- Usage: input 0, output 0, cache read 0, cache write 0, cost 0, turns 0\n\n## Diagnostics\n\nOutput:\n${output}\n\nStderr:\n${stderr}\n\nError:\nnone\n\nMalformed events: 0`;
 
   assert.ok(Buffer.byteLength(formatted) <= COLLECTED_OUTPUT_MAX_BYTES);
   assert.equal(formatted.split("Output:\n").length - 1, 1);
@@ -315,7 +305,7 @@ test("reports final cap counts in the formatted-payload domain after upstream ou
     }),
   );
   const notice = /\n\nOutput truncated: retained (\d+) of (\d+) bytes\.$/.exec(formatted);
-  const completeContent = `# Subagent result: job-42\n\n## Capture limits\nOutput capture truncated: retained 500 of 1000 bytes.\n\nPartial output:\nnone\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n- Usage: input 0, output 0, cache read 0, cache write 0, cost 0, turns 0\n\n## Diagnostics\n\nOutput:\npartial\n\nStderr:\n${stderr}\n\nError:\nnone\n\nMalformed events: 0\nMalformed samples:\nnone`;
+  const completeContent = `# Subagent result: job-42\n\n## Capture limits\nOutput capture truncated: retained 500 of 1000 bytes.\n\nPartial output:\nnone\n\n- Status: failed\n- Agent: reviewer\n- Access: read-only\n- Task: Review token handling\n- Usage: input 0, output 0, cache read 0, cache write 0, cost 0, turns 0\n\n## Diagnostics\n\nOutput:\npartial\n\nStderr:\n${stderr}\n\nError:\nnone\n\nMalformed events: 0`;
 
   assert.ok(notice);
   assert.equal(Number(notice[2]), Buffer.byteLength(completeContent));

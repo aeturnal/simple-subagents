@@ -3,7 +3,6 @@ import type { Job } from "./types.ts";
 
 export const COLLECTED_OUTPUT_MAX_BYTES = 50 * 1024;
 export const CAPTURED_TEXT_MAX_BYTES = 50 * 1024;
-export const MALFORMED_EVENT_SAMPLE_MAX_BYTES = 500;
 
 export interface TruncatedText {
   text: string;
@@ -90,13 +89,12 @@ export const formatCollectedResult = (job: Job): string => {
   ];
 
   if (isFailure) {
-    const samples = job.malformedEventSamples?.length ? job.malformedEventSamples.map((sample) => `- ${sample}`).join("\n") : "none";
     sections.push([
       "## Diagnostics",
       `Output:\n${job.output}`,
       `Stderr:\n${job.stderr}`,
       `Error:\n${job.errorMessage ?? "none"}`,
-      `Malformed events: ${job.malformedEventCount}\nMalformed samples:\n${samples}`,
+      `Malformed events: ${job.malformedEventCount}`,
     ].join("\n\n"));
   } else {
     sections.push(`## Result\n\n${job.output}`);

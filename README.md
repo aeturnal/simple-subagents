@@ -33,6 +33,8 @@ Model-turn and reasoning events appear as fixed activity such as `Model turn sta
 
 `subagent_status` reports bounded task, state, timing, profile, access, launch/reported model, usage, and up to three recent activity previews. It never returns the complete captured answer, stderr, error body, malformed protocol samples, or profile prompt. A completed status points the parent to `subagent_control` to collect the result.
 
+Tool-result details contain only bounded renderer metadata and never store complete job snapshots. Malformed protocol records are counted, but their raw text is discarded.
+
 ```text
 job-2 — running · running for 2m 14s
 Task: Review authentication changes
