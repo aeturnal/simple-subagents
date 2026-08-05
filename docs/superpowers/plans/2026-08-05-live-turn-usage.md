@@ -1,6 +1,6 @@
 # Live Turn-by-Turn Token Usage Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Superseded:** Do not execute this plan. The released implementation follows [`2026-08-05-live-widget-priority-details.md`](./2026-08-05-live-widget-priority-details.md) and uses `ProcessTelemetry` through `onTelemetry` so live updates include both cumulative usage and the observed model. This file remains only as design history.
 
 **Goal:** Publish exact cumulative subagent token usage after every completed assistant message so the existing live widget can show accurate turn-by-turn totals while the job is still running.
 

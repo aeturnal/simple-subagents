@@ -1,7 +1,9 @@
 # Live Turn-by-Turn Token Usage Design
 
 **Date:** 2026-08-05
-**Status:** Approved
+**Status:** Superseded by [`2026-08-05-live-widget-priority-details-design.md`](./2026-08-05-live-widget-priority-details-design.md)
+
+> Historical note: this design proposed a narrow `onUsage` callback. The released implementation uses the richer `ProcessTelemetry` payload through `onTelemetry`, which carries cumulative usage and the observed model. Do not implement the interface described below.
 
 ## Goal
 
