@@ -24,8 +24,8 @@
 
 - Modify `src/process-runner.ts`: define the optional usage callback and emit cloned cumulative usage after each assistant message.
 - Modify `test/process-runner.test.ts`: prove cumulative exact emission, field ordering, and callback isolation.
-- Modify `src/job-manager.ts`: buffer synchronous usage until process registration, publish live snapshots, reject late snapshots, and retain final-result authority.
-- Modify `test/job-manager.test.ts`: prove running/cancelled publication, synchronous-start safety, immutable copying, final replacement, and late-update rejection.
+- Modify `src/job-manager.ts`: first publish running-job usage safely, then extend that state guard for cancelled work awaiting settlement.
+- Modify `test/job-manager.test.ts`: separately prove running publication and cancelled-process publication, alongside synchronous-start safety, immutable copying, final replacement, and late-update rejection.
 - Modify `README.md`: state that exact token usage advances after each completed model turn.
 - No change to `src/live-widget.ts`: its formatter and animation already consume `job.usage` correctly.
 
@@ -173,7 +173,7 @@ git commit -m "feat: stream cumulative subagent usage"
 
 ---
 
-### Task 2: Publish usage through `JobManager` and existing views
+### Task 2: Publish usage for running jobs
 
 **Files:**
 
@@ -186,7 +186,7 @@ git commit -m "feat: stream cumulative subagent usage"
 **Interfaces:**
 
 - Consumes: `ProcessRunOptions.onUsage?(usage: UsageStats): void` from Task 1.
-- Produces: running and active-cancelled `Job.usage` snapshots updated through the existing `JobManager.subscribe()` notification path.
+- Produces: running `Job.usage` snapshots updated through the existing `JobManager.subscribe()` notification path, without publishing a running job before its process is registered.
 
 - [ ] **Step 1: Extend the controlled test runner with usage delivery**
 
@@ -246,34 +246,7 @@ test("publishes live usage while running and keeps the final result authoritativ
 });
 ```
 
-- [ ] **Step 3: Write the failing active-cancelled usage test**
-
-Add:
-
-```ts
-test("accepts usage while cancelled work awaits process settlement", async () => {
-  const runner = new ControlledRunner();
-  const manager = new JobManager({ runner });
-  const [job] = manager.enqueue(makeRequests(1), profiles, defaults);
-  assert.ok(job);
-
-  const cancelling = manager.cancel(job.id);
-  runner.releaseCancel(0);
-  await cancelling;
-  assert.equal(manager.get(job.id)?.state, "cancelled");
-
-  runner.usage(0, { input: 7, output: 11, cacheRead: 2, cacheWrite: 3, cost: 0.4, turns: 1 });
-  assert.deepEqual(manager.get(job.id)?.usage, {
-    input: 7, output: 11, cacheRead: 2, cacheWrite: 3, cost: 0.4, turns: 1,
-  });
-
-  runner.complete(0, successfulResult("late result"));
-  await runner.flush();
-  assert.deepEqual(manager.get(job.id)?.usage, usage());
-});
-```
-
-- [ ] **Step 4: Write the failing synchronous-registration safety test**
+- [ ] **Step 3: Write the failing synchronous-registration safety test**
 
 Add beside the synchronous-progress regression test:
 
@@ -297,17 +270,17 @@ test("buffers synchronous usage until the running process is registered", () => 
 });
 ```
 
-- [ ] **Step 5: Run the focused manager tests and verify RED**
+- [ ] **Step 4: Run the focused manager tests and verify RED**
 
 Run:
 
 ```bash
-npx tsx --test --test-name-pattern="usage|synchronous usage" test/job-manager.test.ts
+npx tsx --test --test-name-pattern="publishes live usage|buffers synchronous usage" test/job-manager.test.ts
 ```
 
-Expected: the new tests FAIL because `JobManager` does not yet provide or store `onUsage`.
+Expected: both new tests FAIL because `JobManager` does not yet provide or store `onUsage`.
 
-- [ ] **Step 6: Buffer usage emitted before process registration**
+- [ ] **Step 5: Buffer usage emitted before process registration**
 
 In `JobManager.pump`, add a latest-snapshot buffer beside `synchronousProgress`:
 
@@ -339,21 +312,21 @@ if (synchronousProgress.length === 0 && synchronousUsage === undefined) {
 
 Keep this replay after `this.active.set`, `registered = true`, result-handler registration, `this.starting.delete(id)`, and cancellation routing, matching the current synchronous-progress safety order.
 
-- [ ] **Step 7: Add the focused manager usage update**
+- [ ] **Step 6: Add the running-job usage update**
 
 Add this private method immediately before `addProgress`:
 
 ```ts
 private updateUsage(entry: InternalJob, nextUsage: UsageStats): void {
-  if (entry.job.state !== "running" && entry.job.state !== "cancelled") return;
+  if (entry.job.state !== "running") return;
   entry.job.usage = structuredClone(nextUsage);
   this.notify();
 }
 ```
 
-Do not add usage to progress. Leave `applyResult()` unchanged so settlement replaces live usage with `result.usage`.
+Do not add usage to progress. Leave `applyResult()` unchanged so settlement replaces live usage with `result.usage`. Task 3 will separately extend the state guard for cancelled work that is still awaiting process settlement.
 
-- [ ] **Step 8: Run manager and widget tests and verify GREEN**
+- [ ] **Step 7: Run manager and widget tests and verify GREEN**
 
 Run:
 
@@ -363,7 +336,7 @@ npx tsx --test test/job-manager.test.ts test/live-widget.test.ts test/dashboard.
 
 Expected: all selected tests PASS. Existing live-widget tests must still show combined `input + output` totals, and timer-count tests must remain unchanged.
 
-- [ ] **Step 9: Document exact turn-boundary updates**
+- [ ] **Step 8: Document exact turn-boundary updates**
 
 Change the live-widget paragraph in `README.md` to:
 
@@ -371,11 +344,96 @@ Change the live-widget paragraph in `README.md` to:
 While jobs are queued or running, an above-editor tree shows each active subagent, its latest bounded activity, turns, tool uses, tokens, and elapsed time. Exact cumulative token usage updates after each completed model turn. Running rows use an animated spinner. Completed, failed, and cancelled rows remain visible for three seconds; `/subagents` remains the durable inbox view until the parent collects or discards a result.
 ```
 
-- [ ] **Step 10: Run the full verification suite**
+- [ ] **Step 9: Verify and commit running-job publication**
 
 Run:
 
 ```bash
+npx tsx --test test/job-manager.test.ts test/live-widget.test.ts test/dashboard.test.ts test/job-status.test.ts
+npm run typecheck
+git diff --check
+```
+
+Expected: all selected tests PASS, type checking reports no diagnostics, and `git diff --check` prints nothing.
+
+Commit:
+
+```bash
+git add src/job-manager.ts test/job-manager.test.ts README.md
+git commit -m "feat: publish running subagent usage"
+```
+
+---
+
+### Task 3: Accept usage from cancelled work awaiting settlement
+
+**Files:**
+
+- Modify: `src/job-manager.ts:410-414`
+- Test: `test/job-manager.test.ts` near the cancellation-race coverage
+
+**Interfaces:**
+
+- Consumes: Task 2's private `updateUsage(entry: InternalJob, nextUsage: UsageStats): void` method.
+- Produces: the same cumulative usage publication while a process-backed job is `cancelled` but its process has not settled.
+
+- [ ] **Step 1: Write the failing active-cancelled usage test**
+
+Add:
+
+```ts
+test("accepts usage while cancelled work awaits process settlement", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  const [job] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.ok(job);
+
+  const cancelling = manager.cancel(job.id);
+  runner.releaseCancel(0);
+  await cancelling;
+  assert.equal(manager.get(job.id)?.state, "cancelled");
+
+  runner.usage(0, { input: 7, output: 11, cacheRead: 2, cacheWrite: 3, cost: 0.4, turns: 1 });
+  assert.deepEqual(manager.get(job.id)?.usage, {
+    input: 7, output: 11, cacheRead: 2, cacheWrite: 3, cost: 0.4, turns: 1,
+  });
+
+  runner.complete(0, successfulResult("late result"));
+  await runner.flush();
+  assert.deepEqual(manager.get(job.id)?.usage, usage());
+});
+```
+
+- [ ] **Step 2: Run the focused test and verify RED**
+
+Run:
+
+```bash
+npx tsx --test --test-name-pattern="accepts usage while cancelled" test/job-manager.test.ts
+```
+
+Expected: FAIL because Task 2's state guard ignores usage once the job state is `cancelled`.
+
+- [ ] **Step 3: Extend only the usage state guard**
+
+Change `updateUsage` to:
+
+```ts
+private updateUsage(entry: InternalJob, nextUsage: UsageStats): void {
+  if (entry.job.state !== "running" && entry.job.state !== "cancelled") return;
+  entry.job.usage = structuredClone(nextUsage);
+  this.notify();
+}
+```
+
+Do not change cancellation, process settlement, or `applyResult()`. The test's final assertion proves the settled process result still replaces the active-cancelled snapshot.
+
+- [ ] **Step 4: Run lifecycle and full verification**
+
+Run:
+
+```bash
+npx tsx --test test/job-manager.test.ts test/live-widget.test.ts test/dashboard.test.ts test/job-status.test.ts
 npm test
 npm run typecheck
 git diff --check
@@ -383,11 +441,11 @@ git diff --check
 
 Expected: all tests PASS, type checking reports no diagnostics, and `git diff --check` prints nothing.
 
-- [ ] **Step 11: Commit manager publication and documentation**
+- [ ] **Step 5: Commit cancelled-process publication**
 
 ```bash
-git add src/job-manager.ts test/job-manager.test.ts README.md
-git commit -m "feat: publish live subagent usage"
+git add src/job-manager.ts test/job-manager.test.ts
+git commit -m "fix: retain usage during subagent cancellation"
 ```
 
 ---
@@ -397,6 +455,6 @@ git commit -m "feat: publish live subagent usage"
 - [ ] Run primary language-server diagnostics on `src/process-runner.ts`, `src/job-manager.ts`, `test/process-runner.test.ts`, and `test/job-manager.test.ts`; expect zero errors.
 - [ ] Run `npm test`; expect all non-integration tests to pass and only explicitly marked real-Pi integration tests to remain skipped when credentials are unavailable.
 - [ ] Run `npm run typecheck`; expect success.
-- [ ] Run `git diff --check HEAD~2..HEAD`; expect no output.
+- [ ] Run `git diff --check HEAD~3..HEAD`; expect no output.
 - [ ] Confirm `git status --short` is empty.
 - [ ] Review the complete diff against `docs/superpowers/specs/2026-08-05-live-turn-usage-design.md`, specifically checking callback cloning, synchronous startup, cancelled-process settlement, late callbacks, final-result authority, unchanged timer counts, and unchanged combined token formatting.
