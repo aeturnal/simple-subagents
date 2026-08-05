@@ -13,6 +13,7 @@ import {
   startJobs,
   statusJobs,
   waitJobs,
+  type PublicJobDetail,
   type ToolDetails,
   type ToolServices,
   type WriteConfirmation,
@@ -30,17 +31,18 @@ const usage = (): UsageStats => ({ input: 1, output: 2, cacheRead: 3, cacheWrite
 const profile: AgentProfile = {
   name: "reviewer",
   description: "Reviews code",
-  systemPrompt: "Review carefully.",
+  systemPrompt: "PRIVATE_PROFILE_PROMPT",
   source: "user",
 };
 
-const completed = (output = "finished output"): ProcessResult => ({
+const completed = (output = "finished output", overrides: Partial<ProcessResult> = {}): ProcessResult => ({
   exitCode: 0,
   output,
   stderr: "",
   usage: usage(),
   model: "test-model",
   malformedEventCount: 0,
+  ...overrides,
 });
 
 class ControlledRunner implements ProcessRunner {
@@ -63,6 +65,25 @@ class ControlledRunner implements ProcessRunner {
 }
 
 const text = (result: { content: Array<{ type: string; text?: string }> }): string => result.content[0]?.text ?? "";
+
+const PUBLIC_JOB_DETAIL_KEYS = new Set<keyof PublicJobDetail>([
+  "id",
+  "state",
+  "task",
+  "launchModel",
+  "launchThinkingLevel",
+  "launchThinkingSource",
+]);
+
+const assertPublicJobDetails = (details: ToolDetails): void => {
+  for (const job of details.jobs) {
+    assert.ok(Object.keys(job).every((key) => PUBLIC_JOB_DETAIL_KEYS.has(key as keyof PublicJobDetail)));
+  }
+  assert.doesNotMatch(
+    JSON.stringify(details.jobs),
+    /PRIVATE_PROFILE_PROMPT|PRIVATE_OUTPUT|PRIVATE_STDERR|PRIVATE_ERROR|PRIVATE_PROGRESS|PRIVATE_MALFORMED/u,
+  );
+};
 
 const createServices = (runner = new ControlledRunner(), overrides: Partial<ToolServices> = {}): { services: ToolServices; runner: ControlledRunner } => {
   const manager = new JobManager({ runner });
@@ -112,10 +133,25 @@ test("startJobs applies generic read-only defaults and reports every created ID"
 
   assert.match(text(result), /Started 2 jobs/);
   assert.deepEqual(result.details.jobs.map((job) => job.id), ["job-1", "job-2"]);
+  assertPublicJobDetails(result.details);
   assert.deepEqual(runner.started.map((entry) => entry.options.request), [
     { task: "inspect this", agent: "generic", writeAccess: false, cwd: undefined, model: undefined, thinkingLevel: undefined },
     { task: "review this", agent: "reviewer", writeAccess: false, cwd: "/other", model: undefined, thinkingLevel: undefined },
   ]);
+});
+
+test("startJobs bounds public detail previews", async () => {
+  const { services } = createServices();
+  const result = await startJobs({
+    tasks: [{ task: "t".repeat(2_000), model: "m".repeat(2_000) }],
+  }, services, {} as never);
+
+  assertPublicJobDetails(result.details);
+  for (const job of result.details.jobs) {
+    assert.ok(Buffer.byteLength(job.id, "utf8") <= 512);
+    assert.ok(Buffer.byteLength(job.task, "utf8") <= 512);
+    if (job.launchModel) assert.ok(Buffer.byteLength(job.launchModel, "utf8") <= 512);
+  }
 });
 
 test("startJobs forwards per-job overrides and renders launch selections immediately", async () => {
@@ -237,7 +273,11 @@ test("startJobs sanitizes line breaks in unknown profile diagnostics", async () 
 test("statusJobs returns rich bounded status for one job", async () => {
   const { services, runner } = createServices();
   await startJobs({ tasks: [{ task: "one" }] }, services, {} as never);
-  runner.started[0]?.resolve(completed("secret final answer"));
+  runner.started[0]?.resolve(completed("PRIVATE_OUTPUT", {
+    stderr: "PRIVATE_STDERR",
+    errorMessage: "PRIVATE_ERROR",
+    malformedEventSamples: ["PRIVATE_MALFORMED"],
+  }));
   await runner.flush();
 
   const result = await statusJobs({ id: "job-1" }, services);
@@ -254,6 +294,7 @@ test("statusJobs returns rich bounded status for one job", async () => {
   const details = result.details as ToolDetails & { statuses?: { length: number } };
   assert.equal(details.statuses?.length, 1);
   assert.equal(details.jobs.length, 1);
+  assertPublicJobDetails(details);
   assert.ok(Buffer.byteLength(content, "utf8") < 50 * 1024);
 });
 
@@ -261,16 +302,18 @@ test("statusJobs groups a bounded list without captured output", async () => {
   const jobs: Job[] = Array.from({ length: 25 }, (_, index) => ({
     id: `job-${index + 1}`,
     request: { task: `task ${index + 1}`, agent: "generic", writeAccess: false },
-    profile: { name: "generic", description: "Reviews code", systemPrompt: "private prompt", source: "builtin" },
+    profile: { name: "generic", description: "Reviews code", systemPrompt: "PRIVATE_PROFILE_PROMPT", source: "builtin" },
     state: index % 3 === 0 ? "running" : index % 3 === 1 ? "completed" : "collected",
     createdAt: 1_000,
     startedAt: 2_000,
     finishedAt: index % 3 === 0 ? undefined : 3_000,
-    progress: [],
-    output: "secret list output",
-    stderr: "",
+    progress: [{ type: "diagnostic", text: "PRIVATE_PROGRESS", timestamp: 3_000 }],
+    output: "PRIVATE_OUTPUT",
+    stderr: "PRIVATE_STDERR",
+    errorMessage: "PRIVATE_ERROR",
     usage: usage(),
-    malformedEventCount: 0,
+    malformedEventCount: 1,
+    malformedEventSamples: ["PRIVATE_MALFORMED"],
     launchThinkingSource: "parent",
   }));
   let clockReads = 0;
@@ -285,8 +328,10 @@ test("statusJobs groups a bounded list without captured output", async () => {
   const details = result.details as ToolDetails & { statuses?: { length: number }; omittedStatuses?: number };
   assert.equal(details.statuses?.length, 20);
   assert.equal(details.omittedStatuses, 5);
+  assert.equal(details.jobs.length, 20);
   assert.match(text(result), /5 additional jobs omitted/);
-  assert.doesNotMatch(text(result), /secret list output/);
+  assert.doesNotMatch(text(result), /PRIVATE_OUTPUT/);
+  assertPublicJobDetails(details);
 });
 
 test("statusJobs returns an ordinary diagnostic for an unknown ID", async () => {
@@ -409,6 +454,7 @@ test("controlJobs handles multi-ID cancellation and leaves unknown IDs as diagno
   const result = await controlJobs({ action: "cancel", ids: ["job-1", "missing", "job-2"] }, services);
 
   assert.deepEqual(result.details.jobs.map((job) => [job.id, job.state]), [["job-1", "cancelled"], ["job-2", "cancelled"]]);
+  assertPublicJobDetails(result.details);
   assert.deepEqual(result.details.diagnostics, ["Unknown job: missing"]);
   assert.equal(runner.started[0]?.cancelled, 1);
   assert.equal(runner.started[1]?.cancelled, 1);
@@ -436,17 +482,19 @@ test("controlJobs prevalidates terminal cancellation while preserving cancelled 
 test("controlJobs formats the terminal snapshot before collecting it", async () => {
   const { services, runner } = createServices();
   await startJobs({ tasks: [{ task: "find the answer" }] }, services, {} as never);
-  runner.started[0]?.resolve(completed("secret final answer"));
+  runner.started[0]?.resolve(completed("PRIVATE_OUTPUT"));
   await runner.flush();
 
   const result = await controlJobs({ action: "collect", ids: ["job-1"] }, services);
 
   assert.match(text(result), /# Subagent result: job-1/);
   assert.match(text(result), /Status: completed/);
-  assert.match(text(result), /secret final answer/);
+  assert.match(text(result), /PRIVATE_OUTPUT/);
+  assert.doesNotMatch(JSON.stringify(result.details.jobs), /PRIVATE_OUTPUT/u);
   assert.match(text(result), /Reported model: test-model/);
   assert.match(text(result), /Usage: input 1, output 2, cache read 3, cache write 4, cost 0.5, turns 1/);
   assert.equal(result.details.jobs[0]?.state, "collected");
+  assertPublicJobDetails(result.details);
   assert.equal(services.manager.get("job-1")?.state, "collected");
 });
 
@@ -514,6 +562,7 @@ test("controlJobs discards multiple completed jobs without placing output into m
   const result = await controlJobs({ action: "discard", ids: ["job-1", "job-2"] }, services);
 
   assert.deepEqual(result.details.jobs.map((job) => [job.id, job.state]), [["job-1", "discarded"], ["job-2", "discarded"]]);
+  assertPublicJobDetails(result.details);
   assert.doesNotMatch(text(result), /do not surface/);
 });
 
