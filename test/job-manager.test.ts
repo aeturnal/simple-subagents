@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { JobManager } from "../src/job-manager.js";
-import type { ProcessResult, ProcessRunOptions, ProcessRunner, RunningProcess } from "../src/process-runner.ts";
+import type { ProcessResult, ProcessRunOptions, ProcessRunner, ProcessTelemetry, RunningProcess } from "../src/process-runner.ts";
 import { isSettled, type AgentProfile, type JobRequest, type ProgressItem, type UsageStats } from "../src/types.ts";
 
 const usage = (): UsageStats => ({ input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: 0.5, turns: 1 });
@@ -93,6 +93,10 @@ class ControlledRunner implements ProcessRunner {
     this.started[index]?.options.onProgress(item);
   }
 
+  telemetry(index: number, update: ProcessTelemetry): void {
+    this.started[index]?.options.onTelemetry?.(update);
+  }
+
   releaseCancel(index: number): void {
     this.started[index]?.releaseCancel();
   }
@@ -159,6 +163,13 @@ class TrackedAbortSignal extends EventTarget {
 class SynchronousProgressRunner extends ControlledRunner {
   run(options: ProcessRunOptions): RunningProcess {
     options.onProgress({ type: "tool", text: "synchronous", timestamp: 1 });
+    return super.run(options);
+  }
+}
+
+class SynchronousTelemetryRunner extends ControlledRunner {
+  override run(options: ProcessRunOptions): RunningProcess {
+    options.onTelemetry?.({ usage: usage(), model: "live-model" });
     return super.run(options);
   }
 }
@@ -309,6 +320,52 @@ test("rejects a suffixed model in a batch before creating or starting any job", 
 
   const [next] = manager.enqueue(makeRequests(1), profiles, defaults);
   assert.equal(next?.id, "job-1");
+});
+
+test("publishes immutable live telemetry before process settlement", () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  manager.enqueue(makeRequests(1), profiles, defaults);
+  const update = { usage: usage(), model: "openai-codex/gpt-5.6-sol" };
+  let notifications = 0;
+  manager.subscribe(() => { notifications += 1; });
+  const before = notifications;
+
+  runner.telemetry(0, update);
+  update.usage.input = 999;
+
+  assert.deepEqual(manager.get("job-1")?.usage, usage());
+  assert.equal(manager.get("job-1")?.model, "openai-codex/gpt-5.6-sol");
+  assert.equal(manager.get("job-1")?.state, "running");
+  assert.equal(notifications, before + 1);
+});
+
+test("keeps synchronous startup telemetry", () => {
+  const manager = new JobManager({ runner: new SynchronousTelemetryRunner() });
+  manager.enqueue(makeRequests(1), profiles, defaults);
+
+  assert.deepEqual(manager.get("job-1")?.usage, usage());
+  assert.equal(manager.get("job-1")?.model, "live-model");
+});
+
+test("final result overrides live telemetry and late telemetry is ignored", async () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  manager.enqueue(makeRequests(1), profiles, defaults);
+  runner.telemetry(0, {
+    usage: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 2 },
+    model: "live-model",
+  });
+
+  runner.complete(0, successfulResult("done"));
+  await runner.flush();
+  runner.telemetry(0, {
+    usage: { input: 999, output: 999, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 99 },
+    model: "late-model",
+  });
+
+  assert.deepEqual(manager.get("job-1")?.usage, usage());
+  assert.equal(manager.get("job-1")?.model, "test-model");
 });
 
 test("keeps launch model when Pi later reports a different resolved model", async () => {
