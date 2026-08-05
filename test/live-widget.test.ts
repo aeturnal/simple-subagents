@@ -38,7 +38,7 @@ test("renders active jobs in running, queued, then lingering order", () => {
     job("running", "running", {
       progress: [{ type: "tool", text: "Started read", timestamp: 9_000 }],
     }),
-    job("old", "failed", { finishedAt: 6_999 }),
+    job("old", "failed", { finishedAt: 4_999 }),
     job("collected", "collected"),
     job("discarded", "discarded"),
   ]);
@@ -118,10 +118,10 @@ test("selects and wraps spinner frames", () => {
   assert.match(plain(render([job("running", "running")], 10_000, 12)[1] ?? ""), /⠹/);
 });
 
-test("lingers before but not at the exact three-second boundary", () => {
+test("lingers before but not at the exact five-second boundary", () => {
   const finished = job("done", "completed", { finishedAt: 8_000 });
-  assert.notDeepEqual(render([finished], 10_999), []);
-  assert.deepEqual(render([finished], 11_000), []);
+  assert.notDeepEqual(render([finished], 12_999), []);
+  assert.deepEqual(render([finished], 13_000), []);
 });
 
 test("clamps skewed durations and bounds every visible line", () => {
@@ -138,6 +138,9 @@ test("clamps skewed durations and bounds every visible line", () => {
 test("formats turns, started tool uses, tokens, and duration", () => {
   const text = plain(render([job("running", "running", {
     usage: { input: 12_000, output: 400, cacheRead: 9_000, cacheWrite: 8_000, cost: 1, turns: 2 },
+    model: "openai-codex/gpt-5.6-sol",
+    launchModel: "openai-codex/gpt-5.6-terra",
+    launchThinkingLevel: "high",
     progress: [
       { type: "tool", text: "Started read", timestamp: 3_000 },
       { type: "tool", text: "Updated read", timestamp: 4_000 },
@@ -146,7 +149,63 @@ test("formats turns, started tool uses, tokens, and duration", () => {
     ],
   })])[1] ?? "");
 
-  assert.match(text, /↻2 · 2 tool uses · 12\.4k tokens · 8\.0s$/);
+  assert.match(text, /↻2 · 2 tool uses · 12\.4k tokens · gpt-5\.6-sol · high · 8\.0s$/);
+});
+
+test("uses the short observed model then falls back to the launch model", () => {
+  const observed = plain(render([job("observed", "running", {
+    model: "openai-codex/gpt-5.6-sol",
+    launchModel: "openai-codex/gpt-5.6-terra",
+  })])[1] ?? "");
+  const launch = plain(render([job("launch", "running", {
+    launchModel: "openai-codex/gpt-5.6-terra",
+  })])[1] ?? "");
+
+  assert.match(observed, /gpt-5\.6-sol · 8\.0s$/);
+  assert.match(launch, /gpt-5\.6-terra · 8\.0s$/);
+});
+
+test("falls back to the launch model when the reported model is empty", () => {
+  const row = plain(render([job("empty-reported", "running", {
+    model: "",
+    launchModel: "openai-codex/gpt-5.6-terra",
+  })])[1] ?? "");
+
+  assert.match(row, /gpt-5\.6-terra · 8\.0s$/);
+});
+
+test("renders a sanitized reported model without terminal controls or extra lines", () => {
+  const unstyledTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as never;
+  const lines = formatLiveWidgetLines([job("malformed-reported", "running", {
+    model: "vendor/モデル\u001B[31m\nsafe",
+  })], { now: 10_000, frame: 0, width: 40, theme: unstyledTheme });
+
+  assert.match(lines[1] ?? "", /モデル safe · 8\.0s$/u);
+  assert.equal(lines.every((line) => !line.includes("\n")), true);
+  assert.doesNotMatch(lines.join(""), /\u001B\[31m/u);
+  for (const line of lines) assert.ok(visibleWidth(line) <= 40);
+});
+
+test("truncates the task before the complete detail suffix", () => {
+  const rich = job("wide", "running", {
+    request: { task: "A very long task with emoji 😀 and CJK 漢字 that must shrink", agent: "reviewer", writeAccess: false },
+    usage: { input: 12_000, output: 400, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 2 },
+    progress: [{ type: "tool", text: "Started read", timestamp: 3_000 }],
+    model: "openai-codex/gpt-5.6-sol",
+    launchThinkingLevel: "high",
+  });
+  const suffix = "· ↻2 · 1 tool use · 12.4k tokens · gpt-5.6-sol · high · 8.0s";
+  const prefix = "└─ ⠋ reviewer";
+  const width = visibleWidth(prefix) + 2 + 12 + 1 + visibleWidth(suffix);
+  const row = plain(render([rich], 10_000, 0, width)[1] ?? "");
+  const noTask = plain(render([rich], 10_000, 0, visibleWidth(prefix) + 2 + visibleWidth(suffix))[1] ?? "");
+  const extreme = plain(render([rich], 10_000, 0, visibleWidth(prefix) + 18)[1] ?? "");
+
+  assert.equal(row.endsWith(suffix), true);
+  assert.match(row, /A very lo\.\.\. · ↻2/);
+  assert.equal(noTask, `${prefix}  ${suffix}`);
+  assert.equal(extreme.endsWith("high · 8.0s"), true);
+  assert.equal(visibleWidth(extreme) <= visibleWidth(prefix) + 18, true);
 });
 
 test("uses singular stat labels and compact million tokens", () => {
@@ -241,16 +300,16 @@ test("stops animation and expires terminal rows at the nearest deadline", () => 
   ]);
   assert.equal(h.clock.intervals.size, 0);
   assert.equal(h.clock.timeouts.size, 1);
-  assert.equal([...h.clock.timeouts.values()][0]?.delay, 1_000);
+  assert.equal([...h.clock.timeouts.values()][0]?.delay, 3_000);
 
-  h.clock.now = 11_000;
+  h.clock.now = 13_000;
   [...h.clock.timeouts.values()][0]!.callback();
   assert.equal(h.clock.timeouts.size, 1);
   assert.equal([...h.clock.timeouts.values()][0]?.delay, 1_000);
   assert.equal(plain(h.render().join("\n")).includes("first"), false);
   assert.equal(plain(h.render().join("\n")).includes("second"), true);
 
-  h.clock.now = 12_000;
+  h.clock.now = 14_000;
   [...h.clock.timeouts.values()][0]!.callback();
   assert.equal(h.clock.timeouts.size, 0);
   assert.equal(h.factory, undefined);

@@ -1,5 +1,5 @@
 import { resolveLaunchOptions, type LaunchDefaults, type LaunchOptions } from "./launch-options.js";
-import type { ProcessResult, ProcessRunner, RunningProcess } from "./process-runner.js";
+import type { ProcessResult, ProcessRunner, ProcessTelemetry, RunningProcess } from "./process-runner.js";
 import { CAPTURED_TEXT_MAX_BYTES, truncateUtf8 } from "./output.js";
 import { decideJobControl, inspectJobState } from "./job-lifecycle.js";
 import { isSettled, type AgentProfile, type Job, type JobRequest, type JobState, type ProgressItem, type UsageStats } from "./types.js";
@@ -337,6 +337,7 @@ export class JobManager {
       entry.job.state = "running";
       entry.job.startedAt = this.now();
       const synchronousProgress: ProgressItem[] = [];
+      let synchronousTelemetry: ProcessTelemetry | undefined;
       let registered = false;
 
       let process: RunningProcess;
@@ -349,6 +350,10 @@ export class JobManager {
           onProgress: (item) => {
             if (registered) this.addProgress(entry, item);
             else synchronousProgress.push(structuredClone(item));
+          },
+          onTelemetry: (telemetry) => {
+            if (registered) this.applyTelemetry(entry, telemetry);
+            else synchronousTelemetry = structuredClone(telemetry);
           },
         });
       } catch (error) {
@@ -375,10 +380,10 @@ export class JobManager {
       if (entry.cancellationRequested) {
         void this.cancelActive(entry, process).then(() => reservation.resolveCancellation?.());
       }
-      if (synchronousProgress.length === 0) {
-        this.notify();
-      } else {
+      if (synchronousProgress.length === 0 && synchronousTelemetry === undefined) this.notify();
+      else {
         for (const item of synchronousProgress) this.addProgress(entry, item);
+        if (synchronousTelemetry !== undefined) this.applyTelemetry(entry, synchronousTelemetry);
       }
     }
   }
@@ -405,6 +410,13 @@ export class JobManager {
       if (entry.job.state === "running") this.finish(entry, "cancelled");
     });
     return entry.cancellation;
+  }
+
+  private applyTelemetry(entry: InternalJob, telemetry: ProcessTelemetry): void {
+    if (entry.job.state !== "running") return;
+    entry.job.usage = structuredClone(telemetry.usage);
+    if (telemetry.model !== undefined) entry.job.model = telemetry.model;
+    this.notify();
   }
 
   private addProgress(entry: InternalJob, item: ProgressItem): void {
