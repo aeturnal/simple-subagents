@@ -165,6 +165,27 @@ test("uses the short observed model then falls back to the launch model", () => 
   assert.match(launch, /gpt-5\.6-terra · 8\.0s$/);
 });
 
+test("falls back to the launch model when the reported model is empty", () => {
+  const row = plain(render([job("empty-reported", "running", {
+    model: "",
+    launchModel: "openai-codex/gpt-5.6-terra",
+  })])[1] ?? "");
+
+  assert.match(row, /gpt-5\.6-terra · 8\.0s$/);
+});
+
+test("renders a sanitized reported model without terminal controls or extra lines", () => {
+  const unstyledTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as never;
+  const lines = formatLiveWidgetLines([job("malformed-reported", "running", {
+    model: "vendor/モデル\u001B[31m\nsafe",
+  })], { now: 10_000, frame: 0, width: 40, theme: unstyledTheme });
+
+  assert.match(lines[1] ?? "", /モデル safe · 8\.0s$/u);
+  assert.equal(lines.every((line) => !line.includes("\n")), true);
+  assert.doesNotMatch(lines.join(""), /\u001B\[31m/u);
+  for (const line of lines) assert.ok(visibleWidth(line) <= 40);
+});
+
 test("truncates the task before the complete detail suffix", () => {
   const rich = job("wide", "running", {
     request: { task: "A very long task with emoji 😀 and CJK 漢字 that must shrink", agent: "reviewer", writeAccess: false },

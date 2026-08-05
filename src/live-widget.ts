@@ -52,14 +52,15 @@ const formatTokens = (count: number): string => {
   return `${safe} token${safe === 1 ? "" : "s"}`;
 };
 
-const formatStats = (job: Readonly<Job>, now: number): string => {
+const formatStats = (job: Readonly<Job>, status: ReturnType<typeof projectJobStatus>, now: number): string => {
   const parts: string[] = [];
   if (job.usage.turns > 0) parts.push(`↻${job.usage.turns}`);
   const toolUses = job.progress.filter((item) => item.type === "tool" && item.text.startsWith("Started ")).length;
   if (toolUses > 0) parts.push(`${toolUses} tool use${toolUses === 1 ? "" : "s"}`);
   const tokens = Math.max(0, job.usage.input + job.usage.output);
   if (tokens > 0) parts.push(formatTokens(tokens));
-  const model = (job.model ?? job.launchModel)?.split("/").at(-1);
+  const selectedModel = [status.reportedModel, status.launchModel].find((model) => Boolean(model));
+  const model = selectedModel?.split("/").at(-1);
   if (model) parts.push(model);
   if (job.launchThinkingLevel) parts.push(job.launchThinkingLevel);
   const duration = formatDuration(durationMs(job, now));
@@ -101,7 +102,7 @@ export function formatLiveWidgetLines(jobs: readonly Job[], options: LiveWidgetR
     const agent = job.state === "running" ? theme.bold(status.agent) : theme.fg("dim", status.agent);
     const prefix = `${theme.fg("dim", connector)} ${stateIcon(job, frame, theme)} ${agent}`;
     const task = theme.fg("muted", status.task);
-    const details = theme.fg("dim", `· ${formatStats(job, now)}`);
+    const details = theme.fg("dim", `· ${formatStats(job, status, now)}`);
     lines.push(formatJobRow(prefix, task, details, width));
 
     if (job.state === "running") {
