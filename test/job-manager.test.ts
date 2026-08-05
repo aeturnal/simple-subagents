@@ -246,12 +246,11 @@ test("assigns stable increasing IDs and passes resolved process options", () => 
   assert.equal(first?.createdAt, 100);
   assert.equal(runner.started[0]?.options.cwd, "/request");
   assert.deepEqual(runner.started[0]?.options.launchOptions, {
-    path: "legacy",
-    modelArgument: "parent-model:high",
-    thinkingArgument: undefined,
-    launchModel: "parent-model:high",
+    modelArgument: "parent-model",
+    thinkingArgument: "high",
+    launchModel: "parent-model",
     launchThinkingLevel: "high",
-    launchThinkingSource: "legacy",
+    launchThinkingSource: "parent",
     diagnostics: [],
   });
 });
@@ -291,6 +290,22 @@ test("rejects one invalid override before creating or starting any batch job", (
   assert.throws(() => manager.enqueue(requests, profiles, defaults), /non-empty trimmed string/i);
   assert.deepEqual(manager.list(), []);
   assert.equal(runner.started.length, 0);
+
+  const [next] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.equal(next?.id, "job-1");
+});
+
+test("rejects a suffixed model in a batch before creating or starting any job", () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  const requests = [
+    { ...makeRequests(1)[0]!, model: "openai/gpt-5" },
+    { ...makeRequests(1)[0]!, task: "invalid", model: "openai-codex/gpt-5.6-sol:high" },
+  ];
+
+  assert.throws(() => manager.enqueue(requests, profiles, defaults), /:high.*thinkingLevel|thinkingLevel.*:high/);
+  assert.equal(runner.started.length, 0);
+  assert.deepEqual(manager.list(), []);
 
   const [next] = manager.enqueue(makeRequests(1), profiles, defaults);
   assert.equal(next?.id, "job-1");
@@ -502,14 +517,47 @@ test("retains only the newest 200 progress items", () => {
   const [job] = manager.enqueue(makeRequests(1), profiles, defaults);
   assert.ok(job);
 
-  for (let index = 0; index < 201; index += 1) {
+  for (let index = 0; index < 200; index += 1) {
     runner.progress(0, { type: "tool", text: `event ${index}`, timestamp: index });
   }
+  runner.progress(0, { type: "model", text: "Model reasoning", timestamp: 200 });
+  runner.progress(0, { type: "tool", text: "event 200", timestamp: 201 });
 
   const progress = manager.get(job.id)?.progress;
-  assert.equal(progress?.length, 200);
+  assert.equal(progress?.length, 201);
   assert.equal(progress?.[0]?.text, "event 1");
   assert.equal(progress?.at(-1)?.text, "event 200");
+
+  const retained = manager.get(job.id)?.progress ?? [];
+  assert.equal(retained.filter((item) => item.type === "tool").length, 200);
+  assert.deepEqual(retained.filter((item) => item.type === "model"), [
+    { type: "model", text: "Model reasoning", timestamp: 200 },
+  ]);
+});
+
+test("retains one latest model activity without consuming tool and diagnostic history", () => {
+  const runner = new ControlledRunner();
+  const manager = new JobManager({ runner });
+  const [job] = manager.enqueue(makeRequests(1), profiles, defaults);
+  assert.ok(job);
+
+  for (let index = 0; index < 199; index += 1) {
+    runner.progress(0, { type: "tool", text: `event ${index}`, timestamp: index });
+  }
+  runner.progress(0, { type: "diagnostic", text: "diagnostic", timestamp: 199 });
+  runner.progress(0, { type: "model", text: "Model turn started", timestamp: 200 });
+  runner.progress(0, { type: "text", text: "partial answer", timestamp: 201 });
+  runner.progress(0, { type: "model", text: "Model reasoning", timestamp: 202 });
+
+  const progress = manager.get(job.id)?.progress ?? [];
+  assert.equal(progress.filter((item) => item.type === "tool" || item.type === "diagnostic").length, 200);
+  assert.deepEqual(progress.filter((item) => item.type === "model"), [
+    { type: "model", text: "Model reasoning", timestamp: 202 },
+  ]);
+  assert.deepEqual(progress.filter((item) => item.type === "text"), [
+    { type: "text", text: "partial answer", timestamp: 201, truncation: undefined },
+  ]);
+  assert.equal(progress.at(-1)?.type, "model");
 });
 
 test("retains only the latest text progress alongside bounded non-text history", () => {

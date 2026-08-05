@@ -29,18 +29,20 @@ Ask Pi naturally: “start three parallel subagents to review the tests, depende
 
 While jobs are queued or running, an above-editor tree shows each active subagent, its latest bounded activity, turns, tool uses, tokens, and elapsed time. Running rows use an animated spinner. Completed, failed, and cancelled rows remain visible for three seconds; `/subagents` remains the durable inbox view until the parent collects or discards a result.
 
+Model-turn and reasoning events appear as fixed activity such as `Model turn started` and `Model reasoning`. During a long reasoning stream, the extension refreshes one bounded activity timestamp at most every five seconds. It never captures or displays the model's reasoning text. Heartbeats depend on the selected provider and model emitting Pi reasoning events; the extension does not invent activity when no event arrives.
+
 `subagent_status` reports bounded task, state, timing, profile, access, launch/reported model, usage, and up to three recent activity previews. It never returns the complete captured answer, stderr, error body, malformed protocol samples, or profile prompt. A completed status points the parent to `subagent_control` to collect the result.
 
 ```text
 job-2 — running · running for 2m 14s
 Task: Review authentication changes
 Agent: reviewer · Access: read-only
-Model: openai-codex/gpt-5.6-terra · Thinking: medium (job override)
+Model: openai-codex/gpt-5.6-terra · Thinking: medium (profile)
 Usage: 28000 input · 3000 output · 6 turns · $0.08
 Recent activity:
   4s ago   Completed read
   2s ago   Started lsp_diagnostics
-  now      Checking diagnostics in src/auth.ts
+  now      Model reasoning
 ```
 
 ## Agents and access
@@ -53,39 +55,44 @@ name: reviewer
 description: Review changed code
 tools: read, grep
 model: anthropic/claude-sonnet-4-5
+thinking: medium
 ---
 Return concise, line-referenced findings.
 ```
 
-### Per-job model and thinking
+### Per-job model and optional thinking
 
-A start task can temporarily override its child model and thinking level without changing the profile or parent session:
+Model overrides remain available by default. A start task can temporarily override its child model without changing the profile or parent session:
 
 ```json
 {
   "task": "Review the authentication changes",
   "agent": "reviewer",
   "writeAccess": false,
-  "model": "anthropic/claude-sonnet-4-5",
-  "thinkingLevel": "high"
+  "model": "anthropic/claude-sonnet-4-5"
 }
 ```
 
-Both fields are optional. Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Model selection is job override, then profile, then parent session, then Pi's child default. A job model without a job thinking level inherits the parent thinking level when available.
+Per-job thinking overrides are disabled by default. Normal thinking precedence is profile `thinking`, then the parent session, then Pi or the model default. This keeps the parent agent from increasing child reasoning on each launch.
 
-Model values are opaque Pi IDs or patterns. Values such as `ollama/llama3.1:8b` and models with multiple colons are passed unchanged through `--model`; job thinking is passed separately through `--thinking`, so it overrides a thinking shorthand in the model pattern according to Pi's CLI precedence. Pi remains responsible for pattern resolution, model availability, provider credentials, and provider-specific validation.
+Model values are opaque Pi IDs or patterns. Thinking is passed separately through `--thinking`, not encoded in `--model`. Final model suffixes equal to a normalized thinking level are rejected in profile and job models; use the separate thinking field instead. `ollama/llama3.1:8b` remains valid. Pi performs provider translation and clamping, as well as pattern resolution, model availability, and provider credential checks.
 
 Start and status views report **Launch model** and **Launch thinking**, which describe the arguments selected by this extension. Collected output reports Pi's **Reported model** separately; both model values are shown when resolution produces a different model ID. Overrides do not change the profile prompt, tools, access mode, working directory, parent model, or sibling jobs.
 
-Use `subagent_agents({})` when profile names or capabilities are unknown. It returns profiles in discovery order (built-in `generic` first), including configured model inheritance and the read-only and writable tool allowlists passed when child Pi starts. These are launch ceilings, not guarantees of effective runtime tools: trusted child extensions may alter active tools.
+Use `subagent_agents({})` when profile names or capabilities are unknown. It returns profiles in discovery order (built-in `generic` first), including configured model inheritance and the read-only and writable tool allowlists passed when child Pi starts. Children run with Pi extension discovery disabled. Profile tool lists therefore select built-in tools only; extension-provided web, MCP, diagnostic, nested-subagent, UI, and lifecycle behavior is unavailable. For research that needs external sources, have the parent fetch or clone them before starting a child that analyzes the local copies.
 
 A writable launch allowlist does not authorize a job to write. The parent must still start that job with `writeAccess: true`, and configured write confirmation still applies. Discovery never returns profile system prompts, profile file paths, raw frontmatter, discovery diagnostics, credentials, or parent session context.
 
 Jobs are read-only by default. The parent model can explicitly request write access for a job; writable jobs may ask for confirmation through `~/.pi/agent/simple-subagents.json`:
 
 ```json
-{ "confirmWrites": false }
+{
+  "confirmWrites": false,
+  "allowThinkingOverrides": false
+}
 ```
+
+Set `allowThinkingOverrides` to `true` and run `/reload` when you intentionally want per-job control. The `subagent_start` task schema will then expose `thinkingLevel`, and precedence becomes job `thinkingLevel`, profile `thinking`, parent session, then Pi or the model default. Supported levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
 `confirmWrites` defaults to `false`. Even when write access is requested, give concurrent writers non-overlapping work: all subagents share the same workspace, so overlapping writes can conflict.
 

@@ -2,6 +2,7 @@ import { inspectJobState } from "./job-lifecycle.js";
 
 export interface SimpleSubagentsConfig {
   confirmWrites: boolean;
+  allowThinkingOverrides: boolean;
 }
 
 export type JobState = "queued" | "running" | "completed" | "failed" | "cancelled" | "collected" | "discarded";
@@ -9,7 +10,11 @@ export type AccessMode = "read-only" | "write";
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
-export type LaunchThinkingSource = "job" | "parent" | "model_or_pi_default" | "legacy";
+export type LaunchThinkingSource =
+  | "job"
+  | "profile"
+  | "parent"
+  | "model_or_pi_default";
 
 export interface AgentProfile {
   name: string;
@@ -17,6 +22,7 @@ export interface AgentProfile {
   systemPrompt: string;
   tools?: string[];
   model?: string;
+  thinking?: ThinkingLevel;
   source: "builtin" | "user";
   filePath?: string;
 }
@@ -45,7 +51,7 @@ export interface TextTruncation {
 }
 
 export interface ProgressItem {
-  type: "text" | "tool" | "diagnostic";
+  type: "text" | "tool" | "diagnostic" | "model";
   text: string;
   timestamp: number;
   truncation?: TextTruncation;

@@ -1,7 +1,8 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import type { AgentProfile } from "./types.js";
+import { isThinkingLevel, modelThinkingSuffix } from "./thinking.js";
+import { THINKING_LEVELS, type AgentProfile } from "./types.js";
 
 export interface DiscoverAgentsResult {
   agents: AgentProfile[];
@@ -38,6 +39,16 @@ function isSupportedProfile(frontmatter: Record<string, unknown>): boolean {
   return source !== "project";
 }
 
+const profileThinkingError = (frontmatter: Record<string, unknown>): string | undefined => {
+  if (frontmatter.thinking !== undefined && !isThinkingLevel(frontmatter.thinking))
+    return `thinking must be one of ${THINKING_LEVELS.join(", ")}`;
+  const model = asTrimmedString(frontmatter.model);
+  const suffix = model ? modelThinkingSuffix(model) : undefined;
+  return suffix
+    ? `model must not encode thinking with the reserved suffix :${suffix}; use thinking: ${suffix}`
+    : undefined;
+};
+
 function createAgent(filePath: string, frontmatter: Record<string, unknown>, body: string): AgentProfile | undefined {
   const name = asTrimmedString(frontmatter.name);
   const description = asTrimmedString(frontmatter.description);
@@ -59,6 +70,7 @@ function createAgent(filePath: string, frontmatter: Record<string, unknown>, bod
     systemPrompt: body.trim(),
     tools,
     model: model || undefined,
+    thinking: isThinkingLevel(frontmatter.thinking) ? frontmatter.thinking : undefined,
     source: "user",
     filePath,
   };
@@ -122,6 +134,12 @@ export async function discoverAgents(agentsDir: string): Promise<DiscoverAgentsR
 
     if (seen.has(agent.name)) {
       diagnostics.push(`Skipped duplicate agent ${agent.name} in ${filePath}`);
+      continue;
+    }
+
+    const error = profileThinkingError(frontmatter);
+    if (error) {
+      diagnostics.push(`Skipped ${filePath}: ${error}`);
       continue;
     }
 

@@ -52,7 +52,7 @@ export function boundedPreview(text: string, maxBytes = STATUS_PREVIEW_MAX_BYTES
 
 export interface StatusActivity {
   timestamp: number;
-  kind: "assistant" | "tool" | "diagnostic";
+  kind: "assistant" | "tool" | "diagnostic" | "model";
   summary: string;
 }
 
@@ -86,8 +86,8 @@ const clampDuration = (end: number, start: number): number => Math.max(0, end - 
 
 const thinkingSelection = (job: Readonly<Job>): string => {
   const source = job.launchThinkingSource === "job" ? "job override"
-    : job.launchThinkingSource === "parent" ? "parent session"
-      : job.launchThinkingSource === "legacy" ? "legacy profile/parent behavior"
+    : job.launchThinkingSource === "profile" ? "profile"
+      : job.launchThinkingSource === "parent" ? "parent session"
         : "model or Pi default";
   return job.launchThinkingLevel ? `${job.launchThinkingLevel} (${source})` : source;
 };
@@ -112,6 +112,7 @@ export function projectJobStatus(job: Readonly<Job>, now: number): JobStatus {
         summary: match ? boundedPreview(`${match[1]} ${match[2]}`) : "Tool activity",
       }];
     }
+    if (item.type === "model") return [{ timestamp: item.timestamp, kind: "model", summary: text }];
     return [{ timestamp: item.timestamp, kind: "diagnostic", summary: text }];
   }).slice(-STATUS_ACTIVITY_LIMIT);
   const captureNotices = [

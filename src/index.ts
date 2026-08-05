@@ -21,8 +21,9 @@ export function createSimpleSubagentsExtension(dependencies: ExtensionDependenci
     const readConfig = dependencies.loadConfig ?? loadConfig;
     const discoverProfiles = dependencies.discoverProfiles ?? discoverDefaultAgents;
     const resolveAgentDir = dependencies.getAgentDir ?? getAgentDir;
-    let config = { confirmWrites: false };
+    let config = { confirmWrites: false, allowThinkingOverrides: false };
     let profiles = new Map<string, Job["profile"]>();
+    let toolsRegistered = false;
     let shutdown: Promise<void> | undefined;
 
     const services: ToolServices = {
@@ -43,7 +44,6 @@ export function createSimpleSubagentsExtension(dependencies: ExtensionDependenci
       }),
     };
 
-    registerSubagentTools(pi, services);
     const removeSubagentsUi = registerSubagentsUi(pi, manager);
 
     pi.on("session_start", async (_event, ctx) => {
@@ -53,6 +53,10 @@ export function createSimpleSubagentsExtension(dependencies: ExtensionDependenci
       ]);
       config = loadedConfig.config;
       profiles = new Map(discovered.agents.map((profile) => [profile.name, profile]));
+      if (!toolsRegistered) {
+        registerSubagentTools(pi, services, config.allowThinkingOverrides);
+        toolsRegistered = true;
+      }
       if (loadedConfig.warning) ctx.ui.notify(loadedConfig.warning, "warning");
       for (const diagnostic of discovered.diagnostics) ctx.ui.notify(diagnostic, "warning");
     });

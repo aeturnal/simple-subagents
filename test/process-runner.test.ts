@@ -75,6 +75,15 @@ const argumentValue = (args: string[], name: string): string | undefined => {
   return index < 0 ? undefined : args[index + 1];
 };
 
+const assertIsolatedInvocation = (args: readonly string[]): void => {
+  assert.equal(
+    args.filter((argument) => argument === "--no-extensions").length,
+    1,
+  );
+  assert.equal(args.includes("--extension"), false);
+  assert.equal(args.includes("-e"), false);
+};
+
 test("launches Pi without a shell using the current script and generic read-only tools", async () => {
   const { child, runner, invocation } = spawnedRunner();
 
@@ -87,7 +96,15 @@ test("launches Pi without a shell using the current script and generic read-only
   const actual = invocation();
 
   assert.equal(actual.command, process.execPath);
-  assert.deepEqual(actual.args.slice(0, 5), [process.argv[1], "--mode", "json", "-p", "--no-session"]);
+  assert.deepEqual(actual.args.slice(0, 6), [
+    process.argv[1],
+    "--mode",
+    "json",
+    "-p",
+    "--no-session",
+    "--no-extensions",
+  ]);
+  assertIsolatedInvocation(actual.args);
   assert.equal(argumentValue(actual.args, "--tools"), "read,grep,find,ls");
   assert.equal(actual.args.at(-1), "Inspect the repository");
   assert.deepEqual(actual.spawnOptions, {
@@ -132,26 +149,38 @@ test("falls back to the pi command for a Bun virtual current script", async () =
   }
 });
 
-test("keeps legacy process arguments byte-for-byte unchanged", async () => {
+test("passes inherited thinking separately with child extension isolation", async () => {
   const { child, runner, invocation } = spawnedRunner();
-  const legacyProfile = profile({ systemPrompt: "" });
-  const legacyRequest = request();
+  const inheritedProfile = profile({ systemPrompt: "" });
+  const inheritedRequest = request();
   const running = runner.run(runOptions({
-    request: legacyRequest,
-    profile: legacyProfile,
-    launchOptions: resolveLaunchOptions(legacyRequest, legacyProfile, { parentModel: "ollama/llama3.1:8b", thinkingLevel: "high" }),
+    request: inheritedRequest,
+    profile: inheritedProfile,
+    launchOptions: resolveLaunchOptions(inheritedRequest, inheritedProfile, { parentModel: "ollama/llama3.1:8b", thinkingLevel: "high" }),
   }));
 
   assert.deepEqual(invocation().args, [
-    process.argv[1], "--mode", "json", "-p", "--no-session",
-    "--model", "ollama/llama3.1:8b:high", "--no-tools", "Inspect the repository",
+    process.argv[1],
+    "--mode",
+    "json",
+    "-p",
+    "--no-session",
+    "--no-extensions",
+    "--model",
+    "ollama/llama3.1:8b",
+    "--thinking",
+    "high",
+    "--no-tools",
+    "Inspect the repository",
   ]);
+  assert.equal(invocation().args.includes("ollama/llama3.1:8b:high"), false);
+  assertIsolatedInvocation(invocation().args);
   child.close();
   await running.result;
 });
 
 test("passes opaque override model and explicit thinking as separate arguments", async () => {
-  for (const model of ["anthropic/sonnet:high", "ollama/llama3.1:8b", "vendor/model:real:high"]) {
+  for (const model of ["anthropic/sonnet:preview", "ollama/llama3.1:8b", "vendor/model:real:tag"]) {
     const { child, runner, invocation } = spawnedRunner();
     const nextRequest = request();
     const nextProfile = profile({ systemPrompt: "", tools: ["read", "bash"] });
@@ -159,7 +188,6 @@ test("passes opaque override model and explicit thinking as separate arguments",
       request: nextRequest,
       profile: nextProfile,
       launchOptions: {
-        path: "override",
         modelArgument: model,
         thinkingArgument: "low",
         launchModel: model,
@@ -172,6 +200,7 @@ test("passes opaque override model and explicit thinking as separate arguments",
     assert.equal(argumentValue(invocation().args, "--model"), model);
     assert.equal(argumentValue(invocation().args, "--thinking"), "low");
     assert.equal(argumentValue(invocation().args, "--tools"), "read");
+    assertIsolatedInvocation(invocation().args);
     child.close();
     await running.result;
   }
@@ -181,7 +210,6 @@ test("passes thinking without model when child Pi must select its default", asyn
   const { child, runner, invocation } = spawnedRunner();
   const running = runner.run(runOptions({
     launchOptions: {
-      path: "override",
       modelArgument: undefined,
       thinkingArgument: "max",
       launchModel: undefined,
@@ -193,6 +221,7 @@ test("passes thinking without model when child Pi must select its default", asyn
 
   assert.equal(argumentValue(invocation().args, "--model"), undefined);
   assert.equal(argumentValue(invocation().args, "--thinking"), "max");
+  assertIsolatedInvocation(invocation().args);
   child.close();
   await running.result;
 });
@@ -207,6 +236,7 @@ test("intersects named read-only profile tools with the read-only permission set
   }));
 
   assert.equal(argumentValue(invocation().args, "--tools"), "read");
+  assertIsolatedInvocation(invocation().args);
   child.close();
   await running.result;
 });
@@ -256,6 +286,7 @@ test("permits requested write tools for writable named profiles", async () => {
     getLaunchToolAllowlist(selected, "write").join(","),
   );
   assert.equal(argumentValue(invocation().args, "--tools"), "read,bash,edit,write");
+  assertIsolatedInvocation(invocation().args);
   child.close();
   await running.result;
 });
@@ -311,6 +342,113 @@ test("reduces split Pi text_delta updates into bounded latest text progress", as
   child.stdout.emit("data", Buffer.from('lo"}}\n{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","delta":" world"}}\n'));
 
   assert.deepEqual(progress.map((item) => [item.type, item.text]), [["text", "Hello"], ["text", "Hello world"]]);
+  child.close();
+  await running.result;
+});
+
+test("emits fixed turn and throttled reasoning activity without exposing reasoning text", async () => {
+  const child = new FakeChildProcess();
+  const progress: ProgressItem[] = [];
+  let now = 1_000;
+  const runner = new PiProcessRunner({
+    now: () => now,
+    spawnProcess: () => child,
+  });
+  const running = runner.run(runOptions({ onProgress: (item) => progress.push(item) }));
+  const emit = (event: unknown): void => {
+    child.stdout.emit("data", Buffer.from(`${JSON.stringify(event)}\n`));
+  };
+
+  emit({ type: "turn_start" });
+  emit({
+    type: "message_update",
+    message: { role: "assistant" },
+    assistantMessageEvent: { type: "thinking_start", content: "SECRET_START" },
+  });
+  now = 5_999;
+  emit({
+    type: "message_update",
+    message: { role: "assistant" },
+    assistantMessageEvent: { type: "thinking_delta", delta: "SECRET_EARLY" },
+  });
+  now = 6_000;
+  emit({
+    type: "message_update",
+    message: { role: "assistant" },
+    assistantMessageEvent: { type: "thinking_delta", delta: "SECRET_BOUNDARY" },
+  });
+  now = 10_999;
+  emit({
+    type: "message_update",
+    message: { role: "assistant" },
+    assistantMessageEvent: { type: "thinking_delta", delta: "SECRET_BEFORE_SECOND_HEARTBEAT" },
+  });
+  now = 11_000;
+  emit({
+    type: "message_update",
+    message: { role: "assistant" },
+    assistantMessageEvent: { type: "thinking_delta", delta: "SECRET_SECOND_HEARTBEAT" },
+  });
+  now = 11_001;
+  emit({
+    type: "message_update",
+    message: { role: "assistant" },
+    assistantMessageEvent: { type: "thinking_end", content: "SECRET_END" },
+  });
+  emit({ type: "turn_end" });
+
+  assert.deepEqual(
+    progress.map(({ type, text, timestamp }) => [type, text, timestamp]),
+    [
+      ["model", "Model turn started", 1_000],
+      ["model", "Model reasoning", 1_000],
+      ["model", "Model reasoning", 6_000],
+      ["model", "Model reasoning", 11_000],
+      ["model", "Model reasoning finished", 11_001],
+      ["model", "Model turn finished", 11_001],
+    ],
+  );
+  assert.doesNotMatch(JSON.stringify(progress), /SECRET_/u);
+
+  child.close();
+  await running.result;
+});
+
+test("handles split reasoning events and resets heartbeat state at turn boundaries", async () => {
+  const child = new FakeChildProcess();
+  const progress: ProgressItem[] = [];
+  let now = 10_000;
+  const runner = new PiProcessRunner({
+    now: () => now,
+    spawnProcess: () => child,
+  });
+  const running = runner.run(runOptions({ onProgress: (item) => progress.push(item) }));
+
+  const start = JSON.stringify({
+    type: "message_update",
+    message: { role: "assistant" },
+    assistantMessageEvent: { type: "thinking_start", content: "PRIVATE" },
+  });
+  child.stdout.emit("data", Buffer.from(start.slice(0, 30)));
+  child.stdout.emit("data", Buffer.from(`${start.slice(30)}\n`));
+  child.stdout.emit("data", Buffer.from(`${JSON.stringify({ type: "message_update", message: null, assistantMessageEvent: { type: "thinking_delta", delta: "PRIVATE" } })}\n`));
+  child.stdout.emit("data", Buffer.from(`${JSON.stringify({ type: "message_update", message: { role: "user" }, assistantMessageEvent: { type: "thinking_end", content: "PRIVATE" } })}\n`));
+  child.stdout.emit("data", Buffer.from('{"type":"turn_end"}\n{"type":"turn_start"}\n'));
+  now = 10_001;
+  child.stdout.emit("data", Buffer.from(`${JSON.stringify({
+    type: "message_update",
+    message: { role: "assistant" },
+    assistantMessageEvent: { type: "thinking_delta", delta: "PRIVATE_AFTER_RESET" },
+  })}\n`));
+
+  assert.deepEqual(progress.map((item) => item.text), [
+    "Model reasoning",
+    "Model turn finished",
+    "Model turn started",
+    "Model reasoning",
+  ]);
+  assert.doesNotMatch(JSON.stringify(progress), /PRIVATE/u);
+
   child.close();
   await running.result;
 });

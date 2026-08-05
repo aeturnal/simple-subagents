@@ -67,6 +67,7 @@ export interface PiProcessRunnerDependencies {
   setTimer?(callback: () => void, delay: number): unknown;
   clearTimer?(timer: unknown): void;
   fileExists?(path: string): boolean;
+  now?(): number;
 }
 
 const emptyUsage = (): UsageStats => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 });
@@ -118,19 +119,27 @@ export class PiProcessRunner implements ProcessRunner {
   private readonly setTimer: (callback: () => void, delay: number) => unknown;
   private readonly clearTimer: (timer: unknown) => void;
   private readonly fileExists: (path: string) => boolean;
+  private readonly now: () => number;
 
   constructor(dependencies: PiProcessRunnerDependencies = {}) {
     this.spawnProcess = dependencies.spawnProcess ?? defaultSpawnProcess;
     this.setTimer = dependencies.setTimer ?? ((callback, delay) => setTimeout(callback, delay));
     this.clearTimer = dependencies.clearTimer ?? ((timer) => clearTimeout(timer as NodeJS.Timeout));
     this.fileExists = dependencies.fileExists ?? existsSync;
+    this.now = dependencies.now ?? Date.now;
   }
 
   run(options: ProcessRunOptions): RunningProcess {
     const parser = new JsonLineParser();
     const usage = emptyUsage();
     const { modelArgument, thinkingArgument } = options.launchOptions;
-    const args = ["--mode", "json", "-p", "--no-session"];
+    const args = [
+      "--mode",
+      "json",
+      "-p",
+      "--no-session",
+      "--no-extensions",
+    ];
     if (modelArgument) args.push("--model", modelArgument);
     if (thinkingArgument) args.push("--thinking", thinkingArgument);
 
@@ -163,13 +172,19 @@ export class PiProcessRunner implements ProcessRunner {
       resolveResult = resolve;
     });
 
-    const emitProgress = (text: string) => options.onProgress({ type: "tool", text, timestamp: Date.now() });
+    let lastReasoningActivityAt: number | undefined;
+
+    const emitProgress = (text: string) => options.onProgress({ type: "tool", text, timestamp: this.now() });
+    const emitModelProgress = (text: string, timestamp = this.now()): number => {
+      options.onProgress({ type: "model", text, timestamp });
+      return timestamp;
+    };
     const emitPartial = () => {
       const keptBytes = Buffer.byteLength(partialOutput, "utf8");
       options.onProgress({
         type: "text",
         text: partialOutput,
-        timestamp: Date.now(),
+        timestamp: this.now(),
         truncation: partialOriginalBytes > keptBytes ? { originalBytes: partialOriginalBytes, keptBytes } : undefined,
       });
     };
@@ -191,6 +206,18 @@ export class PiProcessRunner implements ProcessRunner {
       const record = asRecord(event);
       if (!record) return;
 
+      if (record.type === "turn_start") {
+        lastReasoningActivityAt = undefined;
+        emitModelProgress("Model turn started");
+        return;
+      }
+
+      if (record.type === "turn_end") {
+        lastReasoningActivityAt = undefined;
+        emitModelProgress("Model turn finished");
+        return;
+      }
+
       if (record.type === "message_start") {
         const message = asRecord(record.message);
         if (message?.role === "assistant") {
@@ -206,7 +233,28 @@ export class PiProcessRunner implements ProcessRunner {
       if (record.type === "message_update") {
         const message = asRecord(record.message);
         const assistantEvent = asRecord(record.assistantMessageEvent);
-        if (message?.role === "assistant" && assistantEvent?.type === "text_delta") {
+        if (message?.role !== "assistant" || !assistantEvent) return;
+
+        if (assistantEvent.type === "thinking_start") {
+          lastReasoningActivityAt = emitModelProgress("Model reasoning");
+          return;
+        }
+
+        if (assistantEvent.type === "thinking_delta") {
+          const timestamp = this.now();
+          if (lastReasoningActivityAt === undefined || timestamp - lastReasoningActivityAt >= 5_000) {
+            lastReasoningActivityAt = emitModelProgress("Model reasoning", timestamp);
+          }
+          return;
+        }
+
+        if (assistantEvent.type === "thinking_end") {
+          emitModelProgress("Model reasoning finished");
+          lastReasoningActivityAt = undefined;
+          return;
+        }
+
+        if (assistantEvent.type === "text_delta") {
           const delta = asString(assistantEvent.delta);
           if (delta !== undefined) {
             partialOriginalBytes += Buffer.byteLength(delta, "utf8");

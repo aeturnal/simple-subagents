@@ -5,6 +5,7 @@ import {
   AgentsParams,
   ControlParams,
   StartParams,
+  startParamsFor,
   StatusParams,
   WaitParams,
   controlJobs,
@@ -113,34 +114,94 @@ test("startJobs applies generic read-only defaults and reports every created ID"
   assert.match(text(result), /Started 2 jobs/);
   assert.deepEqual(result.details.jobs.map((job) => job.id), ["job-1", "job-2"]);
   assert.deepEqual(runner.started.map((entry) => entry.options.request), [
-    { task: "inspect this", agent: "generic", writeAccess: false, cwd: undefined, model: undefined, thinkingLevel: undefined },
-    { task: "review this", agent: "reviewer", writeAccess: false, cwd: "/other", model: undefined, thinkingLevel: undefined },
+    { task: "inspect this", agent: "generic", writeAccess: false, cwd: undefined, model: undefined },
+    { task: "review this", agent: "reviewer", writeAccess: false, cwd: "/other", model: undefined },
   ]);
 });
 
-test("startJobs forwards per-job overrides and renders launch selections immediately", async () => {
-  const { services, runner } = createServices();
-  const result = await startJobs({
-    tasks: [{ task: "review", agent: "reviewer", model: "ollama/llama3.1:8b", thinkingLevel: "low" }],
-  }, services, {} as never);
+test("start schema hides thinking overrides unless explicitly enabled", () => {
+  const disabled = startParamsFor(false);
+  const enabled = startParamsFor(true);
+  const overrideInput = {
+    tasks: [{ task: "review", thinkingLevel: "high" }],
+  };
 
-  assert.deepEqual(runner.started[0]?.options.request, {
-    task: "review",
+  assert.equal(Check(disabled, overrideInput), false);
+  assert.equal(Check(enabled, overrideInput), true);
+  assert.equal(Check(disabled, { tasks: [{ task: "review" }] }), true);
+
+  const disabledTask = disabled.properties.tasks.items as unknown as {
+    additionalProperties: boolean;
+    properties: Record<string, unknown>;
+  };
+  const enabledTask = enabled.properties.tasks.items as unknown as {
+    additionalProperties: boolean;
+    properties: Record<string, unknown>;
+  };
+  assert.equal(disabledTask.additionalProperties, false);
+  assert.equal(enabledTask.additionalProperties, false);
+  assert.equal("thinkingLevel" in disabledTask.properties, false);
+  assert.equal("thinkingLevel" in enabledTask.properties, true);
+});
+
+test("startJobs strips disabled overrides and preserves enabled overrides", async () => {
+  const disabled = createServices();
+  const injected = {
+    tasks: [{
+      task: "review disabled",
+      agent: "reviewer",
+      model: "ollama/llama3.1:8b",
+      thinkingLevel: "low" as const,
+    }],
+  };
+
+  const disabledResult = await startJobs(
+    injected,
+    disabled.services,
+    {} as never,
+  );
+  assert.deepEqual(disabled.runner.started[0]?.options.request, {
+    task: "review disabled",
     agent: "reviewer",
     writeAccess: false,
     cwd: undefined,
     model: "ollama/llama3.1:8b",
-    thinkingLevel: "low",
   });
-  assert.equal(result.details.jobs[0]?.launchModel, "ollama/llama3.1:8b");
+  assert.equal(disabledResult.details.jobs[0]?.launchThinkingSource, "parent");
+  assert.equal(disabledResult.details.jobs[0]?.launchThinkingLevel, "high");
 
+  const enabled = createServices();
+  const enabledResult = await startJobs(
+    { tasks: [{ ...injected.tasks[0], task: "review enabled" }] },
+    enabled.services,
+    {} as never,
+    true,
+  );
+  assert.equal(enabled.runner.started[0]?.options.request.thinkingLevel, "low");
+  assert.equal(enabledResult.details.jobs[0]?.launchThinkingSource, "job");
+  assert.equal(enabledResult.details.jobs[0]?.launchThinkingLevel, "low");
+});
+
+test("registered enabled start renders the job model and thinking override", async () => {
   const pi = new FakePi();
-  registerSubagentTools(pi as never, services);
-  const rendered = pi.tools.get("subagent_start")?.renderResult(
+  const { services } = createServices();
+  registerSubagentTools(pi as never, services, true);
+  const start = pi.tools.get("subagent_start");
+  assert.ok(start);
+
+  const result = await start.execute(
+    "call",
+    { tasks: [{ task: "review enabled rendering", model: "ollama/llama3.1:8b", thinkingLevel: "low" }] },
+    undefined,
+    undefined,
+    {} as never,
+  );
+  const rendered = start.renderResult(
     result,
     { expanded: true },
     { fg: (_color: string, value: string) => value },
-  ).render(160).join("\n") ?? "";
+  ).render(160).join("\n");
+
   assert.match(rendered, /Launch model: ollama\/llama3\.1:8b/);
   assert.match(rendered, /Launch thinking: low \(job override\)/);
 });
@@ -246,8 +307,8 @@ test("statusJobs returns rich bounded status for one job", async () => {
   assert.match(content, /job-1.*completed/);
   assert.match(content, /Task: one/);
   assert.match(content, /Agent: generic.*Access: read-only/);
-  assert.match(content, /Launch model: parent\/model:high/);
-  assert.match(content, /Launch thinking: high \(legacy profile\/parent behavior\)/);
+  assert.match(content, /Launch model: parent\/model/);
+  assert.match(content, /Launch thinking: high \(parent session\)/);
   assert.match(content, /Usage: input 1, output 2, cache read 3, cache write 4, cost 0.5, turns 1/);
   assert.match(content, /Result ready.*collect job-1/);
   assert.doesNotMatch(content, /secret final answer|systemPrompt|stderr|malformed/);
@@ -532,8 +593,12 @@ test("tool renderers preserve task detail when expanded and keep compact control
   assert.match(compactStart, /… job-2 running/);
   assert.doesNotMatch(compactStart, /Launch model|Launch thinking/);
   const expandedStart = render("subagent_start", started, true);
-  assert.match(expandedStart, /  one/);
-  assert.match(expandedStart, /  two/);
+  assert.match(expandedStart, / {2}one/);
+  assert.match(expandedStart, / {2}two/);
+
+  runner.started[0]?.options.onProgress({ type: "model", text: "Model reasoning", timestamp: 1_500 });
+  const runningStatus = await statusJobs({ id: "job-1" }, services);
+  assert.match(render("subagent_status", runningStatus, true), /Model reasoning/u);
 
   runner.started[0]?.resolve(completed("collected secret"));
   await runner.flush();
@@ -573,15 +638,33 @@ test("tool renderers preserve task detail when expanded and keep compact control
   assert.match(render("subagent_start", declined, true), /Writable jobs were declined\./);
   assert.match(render("subagent_control", invalid, true), /Cannot collect/i);
 
-  const agents = await listAgents(services);
-  const compactAgents = render("subagent_agents", agents, false);
+  const profileThinkingServices = createServices(undefined, {
+    getProfiles: async () => new Map([
+      ["generic", { ...profile, name: "generic", source: "builtin" as const }],
+      ["reviewer", { ...profile, thinking: "medium" as const }],
+    ]),
+  }).services;
+  const profileJobs = await startJobs({ tasks: [{ task: "profile thinking", agent: "reviewer" }] }, profileThinkingServices, {} as never);
+  const profilePi = new FakePi();
+  registerSubagentTools(profilePi as never, profileThinkingServices);
+  const profileRendered = (toolName: string, result: unknown, expanded: boolean): string =>
+    profilePi.tools.get(toolName)?.renderResult(result, { expanded }, theme).render(160).join("\n") ?? "";
+  assert.match(profileRendered("subagent_start", profileJobs, true), /Launch thinking: medium \(profile\)/);
+  const profileStatus = await statusJobs({ id: "job-1" }, profileThinkingServices);
+  assert.match(profileRendered("subagent_status", profileStatus, true), /Launch thinking: medium \(profile\)/);
+  await controlJobs({ action: "cancel", ids: ["job-1"] }, profileThinkingServices);
+
+  const agents = await listAgents(profileThinkingServices);
+  const compactAgents = profileRendered("subagent_agents", agents, false);
   assert.match(compactAgents, /Available subagent profiles:/);
   assert.match(compactAgents, /- generic — Reviews code/);
   assert.match(compactAgents, /- reviewer — Reviews code/);
   assert.doesNotMatch(compactAgents, /Configured model|launch allowlist/);
-  const expandedAgents = render("subagent_agents", agents, true);
+  const expandedAgents = profileRendered("subagent_agents", agents, true);
   assert.match(expandedAgents, /reviewer — Reviews code/);
   assert.match(expandedAgents, /Model: parent model \(inherited\)/);
+  assert.match(expandedAgents, /Thinking: medium/);
+  assert.match(expandedAgents, /generic — Reviews code[\s\S]*Thinking: parent thinking \(inherited\)/);
   assert.match(expandedAgents, /Read-only launch allowlist: none/);
   assert.match(expandedAgents, /Writable launch allowlist: none/);
   assert.match(expandedAgents, /Supports write-capable tools: no/);
@@ -591,6 +674,52 @@ test("tool renderers preserve task detail when expanded and keep compact control
   const compactDiscard = render("subagent_control", discarded, false);
   assert.match(compactDiscard, /Discarded 1 job/);
   assert.match(compactDiscard, /⌫ job-2 discarded/);
+});
+
+test("expanded cancel rendering includes profile-selected launch thinking only outside compact output", async () => {
+  const pi = new FakePi();
+  const { services } = createServices(undefined, {
+    getProfiles: async () => new Map([
+      ["generic", { ...profile, name: "generic", source: "builtin" as const }],
+      ["reviewer", { ...profile, thinking: "medium" as const }],
+    ]),
+  });
+  registerSubagentTools(pi as never, services);
+  const theme = { fg: (_color: string, value: string) => value };
+  const render = (result: unknown, expanded: boolean): string =>
+    pi.tools.get("subagent_control")?.renderResult(result, { expanded }, theme).render(160).join("\n") ?? "";
+
+  await startJobs({ tasks: [{ task: "cancel profile thinking", agent: "reviewer" }] }, services, {} as never);
+  const cancelled = await controlJobs({ action: "cancel", ids: ["job-1"] }, services);
+
+  assert.deepEqual(cancelled.details.diagnostics, []);
+  assert.doesNotMatch(render(cancelled, false), /Launch model|Launch thinking|cancel profile thinking/);
+  assert.match(render(cancelled, true), / {2}cancel profile thinking/);
+  assert.match(render(cancelled, true), /Launch thinking: medium \(profile\)/);
+});
+
+test("expanded discard rendering includes profile-selected launch thinking only outside compact output", async () => {
+  const pi = new FakePi();
+  const { services, runner } = createServices(undefined, {
+    getProfiles: async () => new Map([
+      ["generic", { ...profile, name: "generic", source: "builtin" as const }],
+      ["reviewer", { ...profile, thinking: "medium" as const }],
+    ]),
+  });
+  registerSubagentTools(pi as never, services);
+  const theme = { fg: (_color: string, value: string) => value };
+  const render = (result: unknown, expanded: boolean): string =>
+    pi.tools.get("subagent_control")?.renderResult(result, { expanded }, theme).render(160).join("\n") ?? "";
+
+  await startJobs({ tasks: [{ task: "discard profile thinking", agent: "reviewer" }] }, services, {} as never);
+  runner.started[0]?.resolve(completed());
+  await runner.flush();
+  const discarded = await controlJobs({ action: "discard", ids: ["job-1"] }, services);
+
+  assert.deepEqual(discarded.details.diagnostics, []);
+  assert.doesNotMatch(render(discarded, false), /Launch model|Launch thinking|discard profile thinking/);
+  assert.match(render(discarded, true), / {2}discard profile thinking/);
+  assert.match(render(discarded, true), /Launch thinking: medium \(profile\)/);
 });
 
 test("registered subagent_wait forwards the parent tool signal without cancelling jobs", async () => {
@@ -692,9 +821,9 @@ test("controlJobs propagates formatter failures", async () => {
 test("registered tools expose strict schema boundaries and required guidance", () => {
   const pi = new FakePi();
   const { services } = createServices();
-  registerSubagentTools(pi as never, services);
+  registerSubagentTools(pi as never, services, false);
 
-  const startSchema = StartParams as unknown as { properties: { tasks: { minItems: number; maxItems: number; items: { properties: { task: { minLength: number }; agent: { default: string }; writeAccess: { default: boolean }; model: { minLength: number; pattern: string }; thinkingLevel: { enum: string[] } } } } } };
+  const startSchema = StartParams as unknown as { properties: { tasks: { minItems: number; maxItems: number; items: { properties: { task: { minLength: number }; agent: { default: string }; writeAccess: { default: boolean }; model: { minLength: number; pattern: string } } } } } };
   const statusSchema = StatusParams as unknown as { properties: { id: { type: string } } };
   const controlSchema = ControlParams as unknown as { properties: { action: { enum: string[] }; ids: { minItems: number; maxItems: number } } };
   assert.equal(startSchema.properties.tasks.minItems, 1);
@@ -704,7 +833,6 @@ test("registered tools expose strict schema boundaries and required guidance", (
   assert.equal(startSchema.properties.tasks.items.properties.writeAccess.default, false);
   const taskProperties = startSchema.properties.tasks.items.properties;
   assert.equal(taskProperties.model.minLength, 1);
-  assert.deepEqual(taskProperties.thinkingLevel.enum, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
   assert.equal(new RegExp(taskProperties.model.pattern).test("ollama/llama3.1:8b"), true);
   assert.equal(new RegExp(taskProperties.model.pattern).test(" leading"), false);
   assert.equal(new RegExp(taskProperties.model.pattern).test("vendor/model\u0000name"), false);
@@ -740,13 +868,46 @@ test("registered tools expose strict schema boundaries and required guidance", (
   assert.match(pi.tools.get("subagent_wait")?.description ?? "", /at most 5 minutes/i);
 });
 
+const runtimeStartTool = async (allowThinkingOverrides: boolean) => {
+  const pi = new FakePi();
+  createSimpleSubagentsExtension({
+    loadConfig: async () => ({
+      config: { confirmWrites: false, allowThinkingOverrides },
+    }),
+    discoverProfiles: async () => ({
+      agents: [{ ...profile, name: "generic", source: "builtin" as const }],
+      diagnostics: [],
+    }),
+  })(pi as never);
+
+  assert.equal(pi.tools.has("subagent_start"), false);
+  await pi.emit("session_start", {}, fakeContext({ hasUI: true }, pi));
+  const start = pi.tools.get("subagent_start");
+  assert.ok(start);
+  return start;
+};
+
+test("runtime registers the disabled start schema after config loads", async () => {
+  const start = await runtimeStartTool(false);
+  assert.equal(Check(start.parameters, {
+    tasks: [{ task: "review", thinkingLevel: "high" }],
+  }), false);
+});
+
+test("runtime registers the enabled start schema after opt-in", async () => {
+  const start = await runtimeStartTool(true);
+  assert.equal(Check(start.parameters, {
+    tasks: [{ task: "review", thinkingLevel: "high" }],
+  }), true);
+});
+
 test("runtime does not register or emit automatic completion messages", async () => {
   const pi = new FakePi();
   const runner = new ControlledRunner();
   const manager = new JobManager({ runner });
   createSimpleSubagentsExtension({
     createManager: () => manager,
-    loadConfig: async () => ({ config: { confirmWrites: false } }),
+    loadConfig: async () => ({ config: { confirmWrites: false, allowThinkingOverrides: false } }),
     discoverProfiles: async () => ({
       agents: [{ ...profile, name: "generic", source: "builtin" }],
       diagnostics: [],
@@ -776,7 +937,7 @@ test("runtime loads config only from Pi's agent directory, never the project con
     getAgentDir: () => "/pi-agent",
     loadConfig: async (path) => {
       configPaths.push(path);
-      return { config: { confirmWrites: false } };
+      return { config: { confirmWrites: false, allowThinkingOverrides: false } };
     },
     discoverProfiles: async () => ({ agents: [], diagnostics: [] }),
   };
@@ -797,7 +958,7 @@ test("runtime loads config and profiles, surfaces diagnostics, confirms writable
     getAgentDir: () => "/pi-agent",
     loadConfig: async (path) => {
       assert.equal(path, "/pi-agent/simple-subagents.json");
-      return { config: { confirmWrites: true }, warning: "config warning" };
+      return { config: { confirmWrites: true, allowThinkingOverrides: false }, warning: "config warning" };
     },
     discoverProfiles: async () => ({ agents: [{ ...profile, name: "writer" }], diagnostics: ["profile warning"] }),
   };
@@ -824,12 +985,11 @@ test("runtime loads config and profiles, surfaces diagnostics, confirms writable
       cwd: "/workspace",
       profile: "writer",
       launchOptions: {
-        path: "legacy",
-        modelArgument: "parent/model:high",
-        thinkingArgument: undefined,
-        launchModel: "parent/model:high",
+        modelArgument: "parent/model",
+        thinkingArgument: "high",
+        launchModel: "parent/model",
         launchThinkingLevel: "high",
-        launchThinkingSource: "legacy",
+        launchThinkingSource: "parent",
         diagnostics: [],
       },
     },
@@ -837,12 +997,11 @@ test("runtime loads config and profiles, surfaces diagnostics, confirms writable
       cwd: "/workspace",
       profile: "writer",
       launchOptions: {
-        path: "legacy",
-        modelArgument: "parent/model:high",
-        thinkingArgument: undefined,
-        launchModel: "parent/model:high",
+        modelArgument: "parent/model",
+        thinkingArgument: "high",
+        launchModel: "parent/model",
         launchThinkingLevel: "high",
-        launchThinkingSource: "legacy",
+        launchThinkingSource: "parent",
         diagnostics: [],
       },
     },
@@ -861,7 +1020,7 @@ test("runtime reports writable jobs declined when UI confirmation rejects", asyn
   const manager = new JobManager({ runner });
   createSimpleSubagentsExtension({
     createManager: () => manager,
-    loadConfig: async () => ({ config: { confirmWrites: true } }),
+    loadConfig: async () => ({ config: { confirmWrites: true, allowThinkingOverrides: false } }),
     discoverProfiles: async () => ({ agents: [{ ...profile, name: "writer" }], diagnostics: [] }),
   })(pi as never);
   await pi.emit("session_start", {}, fakeContext({ hasUI: true, confirmResult: false }, pi));
@@ -883,7 +1042,7 @@ test("runtime starts writable jobs without confirmation when configuration disab
   const manager = new JobManager({ runner });
   createSimpleSubagentsExtension({
     createManager: () => manager,
-    loadConfig: async () => ({ config: { confirmWrites: false } }),
+    loadConfig: async () => ({ config: { confirmWrites: false, allowThinkingOverrides: false } }),
     discoverProfiles: async () => ({ agents: [{ ...profile, name: "writer" }], diagnostics: [] }),
   })(pi as never);
   await pi.emit("session_start", {}, fakeContext({ hasUI: false }, pi));
@@ -904,7 +1063,7 @@ test("runtime reports writable confirmation requiring interactive UI when confir
   const manager = new JobManager({ runner: new ControlledRunner() });
   createSimpleSubagentsExtension({
     createManager: () => manager,
-    loadConfig: async () => ({ config: { confirmWrites: true } }),
+    loadConfig: async () => ({ config: { confirmWrites: true, allowThinkingOverrides: false } }),
     discoverProfiles: async () => ({ agents: [{ ...profile, name: "writer" }], diagnostics: [] }),
   })(pi as never);
   await pi.emit("session_start", {}, fakeContext({ hasUI: false }, pi));
