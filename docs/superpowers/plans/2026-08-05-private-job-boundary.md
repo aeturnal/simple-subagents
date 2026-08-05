@@ -289,32 +289,28 @@ git commit -m "fix: project safe subagent tool details"
 
 ---
 
-### Task 2: Discard malformed protocol text at the parser
+### Task 2: Stop malformed text at the capture boundary
 
 **Files:**
 
 - Modify: `src/json-stream.ts:1-58`
 - Modify: `src/process-runner.ts:20-33,285-306`
 - Modify: `src/job-manager.ts:1-5,431-453`
-- Modify: `src/types.ts:54-79`
-- Modify: `src/output.ts:1-7,65-107`
-- Modify: `src/dashboard.ts:26-52,236-277`
-- Modify: `README.md:15-36,94-98`
-- Test: `test/json-output.test.ts`
-- Test: `test/process-runner.test.ts`
-- Test: `test/job-manager.test.ts`
-- Test: `test/job-status.test.ts`
-- Test: `test/dashboard.test.ts`
+- Test: `test/json-output.test.ts:31-117`
+- Test: `test/process-runner.test.ts:495-516`
+- Test: `test/job-manager.test.ts:617-645`
+- Test: `test/tools.test.ts:237-290`
 
 **Interfaces:**
 
 - Preserves: `JsonLineParser.malformedCount`, `ProcessResult.malformedEventCount`, and `Job.malformedEventCount`.
-- Removes: `JsonLineParser.malformedSamples`, `ProcessResult.malformedEventSamples`, `Job.malformedEventSamples`, and `MALFORMED_EVENT_SAMPLE_MAX_BYTES`.
-- Preserves: process state decisions, output capture, collection limits, and dashboard access to normal output/stderr/errors.
+- Removes: `JsonLineParser.malformedSamples` and `ProcessResult.malformedEventSamples`.
+- Stops: `JobManager` from assigning malformed raw text to new jobs.
+- Temporarily preserves: the optional legacy `Job.malformedEventSamples` field so output and dashboard cleanup can be reviewed separately in Task 3.
 
-- [ ] **Step 1: Add the failing malformed-reasoning privacy test**
+- [ ] **Step 1: Add the failing parser privacy test**
 
-In `test/json-output.test.ts`, replace the malformed-sample retention tests with this regression test:
+In `test/json-output.test.ts`, change the blank-record test to assert `parser.malformedCount === 1` instead of inspecting a sample. Replace the tests named `"counts malformed records and retains three 500-character samples"` and `"bounds malformed samples at a UTF-8-safe byte limit"` with:
 
 ```ts
 test("counts malformed reasoning records without retaining their text", () => {
@@ -339,7 +335,125 @@ assert.equal((parser as unknown as { pending: string }).pending, "");
 assert.deepEqual(parser.push(Buffer.from('{"recovered":true}\n')), [{ recovered: true }]);
 ```
 
-Replace the failed collection sample fixture with a legacy-shaped object. This proves the formatter does not expose raw text even if an old object still carries the removed property:
+Remove the now-unused `MALFORMED_EVENT_SAMPLE_MAX_BYTES` import and every `parser.malformedSamples` assertion from this parser test section. Leave the failed collection formatting tests unchanged until Task 3.
+
+- [ ] **Step 2: Add failing runner and manager assertions**
+
+In `test/process-runner.test.ts`, rename the capture-bound test to `"bounds captured output, stderr, and assistant errors without returning malformed text"`. Keep its malformed stdout line and replace sample assertions with:
+
+```ts
+assert.equal(result.malformedEventCount, 1);
+assert.equal("malformedEventSamples" in result, false);
+assert.doesNotMatch(JSON.stringify(result), /not-json-/u);
+```
+
+In `test/job-manager.test.ts`, remove `malformedEventSamples` from the failed process result and expected job. Add:
+
+```ts
+const stored = manager.get(job.id);
+assert.equal(stored?.malformedEventCount, 2);
+assert.equal(stored && "malformedEventSamples" in stored, false);
+```
+
+In the single-status setup in `test/tools.test.ts`, remove the `malformedEventSamples` override from `completed(...)`. Keep the grouped fake-job sample until Task 3 so Task 1 continues checking that projections reject legacy private fields.
+
+- [ ] **Step 3: Run capture tests and confirm they fail**
+
+Run:
+
+```bash
+npx tsx --test \
+  test/json-output.test.ts \
+  test/process-runner.test.ts \
+  test/job-manager.test.ts \
+  test/tools.test.ts
+```
+
+Expected: FAIL because the parser still retains malformed text, the process result still returns it, and the manager still copies it into jobs.
+
+- [ ] **Step 4: Remove malformed text from the capture path**
+
+In `src/json-stream.ts`, keep only the count:
+
+```ts
+import { StringDecoder } from "node:string_decoder";
+import { CAPTURED_TEXT_MAX_BYTES } from "./output.ts";
+
+private malformed(): unknown[] {
+  this._malformedCount += 1;
+  return [];
+}
+```
+
+Delete `_malformedSamples` and its getter. Call `this.malformed()` without passing record text from `consume()` and `parse()`.
+
+In `src/process-runner.ts`, remove `malformedEventSamples` from `ProcessResult` and from the object passed to `resolveResult()`. Keep:
+
+```ts
+malformedEventCount: parser.malformedCount,
+```
+
+In `src/job-manager.ts`, remove `MALFORMED_EVENT_SAMPLE_MAX_BYTES` from the import and delete the assignment that copies and truncates `result.malformedEventSamples`. Keep:
+
+```ts
+entry.job.malformedEventCount = result.malformedEventCount;
+```
+
+Do not remove `Job.malformedEventSamples`, collection formatting, or dashboard rendering in this task.
+
+- [ ] **Step 5: Run capture tests and typecheck**
+
+Run:
+
+```bash
+npx tsx --test \
+  test/json-output.test.ts \
+  test/process-runner.test.ts \
+  test/job-manager.test.ts \
+  test/tools.test.ts
+npm run typecheck
+```
+
+Expected: all focused tests and typecheck PASS. New jobs retain the malformed count but no raw malformed text reaches `ProcessResult` or `JobManager`.
+
+- [ ] **Step 6: Commit the capture-boundary fix**
+
+```bash
+git add \
+  src/json-stream.ts \
+  src/process-runner.ts \
+  src/job-manager.ts \
+  test/json-output.test.ts \
+  test/process-runner.test.ts \
+  test/job-manager.test.ts \
+  test/tools.test.ts
+git commit -m "fix: discard malformed protocol text at capture"
+```
+
+---
+
+### Task 3: Remove obsolete malformed-sample storage and display
+
+**Files:**
+
+- Modify: `src/types.ts:54-79`
+- Modify: `src/output.ts:1-7,65-107`
+- Modify: `src/dashboard.ts:26-52,236-277`
+- Modify: `README.md:15-36,94-98`
+- Test: `test/json-output.test.ts:183-317`
+- Test: `test/job-status.test.ts:24-42`
+- Test: `test/dashboard.test.ts:191-299`
+- Test: `test/tools.test.ts:258-290`
+
+**Interfaces:**
+
+- Removes: the legacy optional `Job.malformedEventSamples` field and `MALFORMED_EVENT_SAMPLE_MAX_BYTES`.
+- Preserves: `Job.malformedEventCount`, failed collection diagnostics, and dashboard malformed-event diagnostics.
+- Preserves: collection output, normal output/stderr/error inspection, capture limits, and dashboard layout.
+
+- [ ] **Step 1: Add failing collection and dashboard privacy tests**
+
+In `test/json-output.test.ts`, replace the failed collection sample fixture with a deliberate legacy-shaped object:
 
 ```ts
 const legacyJob = job({
@@ -353,25 +467,7 @@ assert.match(formatted, /Malformed events: 2/u);
 assert.doesNotMatch(formatted, /Malformed samples|PRIVATE_REASONING_TEXT_MUST_NOT_SURVIVE/u);
 ```
 
-- [ ] **Step 2: Add failing runner, manager, and dashboard boundary assertions**
-
-In `test/process-runner.test.ts`, rename the existing capture-bound test to `"bounds captured output, stderr, and assistant errors without returning malformed text"`. Keep the malformed stdout input, but replace sample assertions with:
-
-```ts
-assert.equal(result.malformedEventCount, 1);
-assert.equal("malformedEventSamples" in result, false);
-assert.doesNotMatch(JSON.stringify(result), /not-json-/u);
-```
-
-In `test/job-manager.test.ts`, remove `malformedEventSamples` from the failed result and expected job. Add:
-
-```ts
-const stored = manager.get(job.id);
-assert.equal(stored?.malformedEventCount, 2);
-assert.equal(stored && "malformedEventSamples" in stored, false);
-```
-
-In `test/dashboard.test.ts`, remove malformed sample fields from normal fixtures. For the full-view privacy assertion, pass one deliberate legacy-shaped job so the test fails while the dashboard still reads the old property:
+In `test/dashboard.test.ts`, remove malformed samples from normal fixtures. Pass one legacy-shaped job to the full-view test:
 
 ```ts
 const legacyJob = job("job-1", "failed", {
@@ -389,70 +485,47 @@ assert.match(text, /event\./u);
 assert.doesNotMatch(text, /malformed protocol samples|PRIVATE_REASONING_TEXT_MUST_NOT_SURVIVE/ui);
 ```
 
-Remove the obsolete `malformedEventSamples` fixture from `test/job-status.test.ts`.
+Remove the obsolete malformed-sample fixtures from `test/job-status.test.ts` and the grouped status fixture in `test/tools.test.ts`.
 
-- [ ] **Step 3: Run focused tests and confirm they fail**
+- [ ] **Step 2: Run presentation tests and confirm they fail**
 
 Run:
 
 ```bash
 npx tsx --test \
   test/json-output.test.ts \
-  test/process-runner.test.ts \
-  test/job-manager.test.ts \
   test/job-status.test.ts \
-  test/dashboard.test.ts
+  test/dashboard.test.ts \
+  test/tools.test.ts
 ```
 
-Expected: FAIL because the parser and downstream result types still retain malformed sample text and collection/dashboard output still contains sample labels.
+Expected: FAIL because collection and the full dashboard still display the raw legacy sample.
 
-- [ ] **Step 4: Remove malformed sample retention and propagation**
+- [ ] **Step 3: Remove obsolete storage and displays**
 
-Make these minimal production changes:
-
-1. In `src/json-stream.ts`, keep only the count:
+In `src/types.ts`, remove:
 
 ```ts
-import { StringDecoder } from "node:string_decoder";
-import { CAPTURED_TEXT_MAX_BYTES } from "./output.ts";
-
-// Remove _malformedSamples and the malformedSamples getter.
-
-private malformed(): unknown[] {
-  this._malformedCount += 1;
-  return [];
-}
+malformedEventSamples?: string[];
 ```
 
-Call `this.malformed()` without passing record text from `consume()` and `parse()`.
-
-1. Remove `malformedEventSamples` from `ProcessResult` in `src/process-runner.ts` and from the object passed to `resolveResult()`.
-
-1. Remove `malformedEventSamples` from `Job` in `src/types.ts`.
-
-1. In `src/job-manager.ts`, remove `MALFORMED_EVENT_SAMPLE_MAX_BYTES` from the import and delete the assignment that copies/truncates `result.malformedEventSamples`. Keep:
-
-```ts
-entry.job.malformedEventCount = result.malformedEventCount;
-```
-
-1. In `src/output.ts`, delete `MALFORMED_EVENT_SAMPLE_MAX_BYTES`. Replace failed-job malformed diagnostics with the count only:
+In `src/output.ts`, delete `MALFORMED_EVENT_SAMPLE_MAX_BYTES`. Replace failed-job malformed diagnostics with the count only:
 
 ```ts
 `Malformed events: ${job.malformedEventCount}`,
 ```
 
-1. In `src/dashboard.ts`, remove `malformedEventSamples` from `renderFingerprint()`. Replace the full-view malformed value with:
+In `src/dashboard.ts`, remove `malformedEventSamples` from `renderFingerprint()`. Replace the full-view malformed value with:
 
 ```ts
 const malformed = `${job.malformedEventCount} malformed protocol event${job.malformedEventCount === 1 ? "" : "s"}.`;
 ```
 
-Do not remove dashboard display of captured output, stderr, error, or progress; those are memory-only inspection features and outside this change.
+Do not remove dashboard display of captured output, stderr, error, or progress.
 
-- [ ] **Step 5: Update exact-output tests and README wording**
+- [ ] **Step 4: Update exact-output tests and README wording**
 
-In `test/json-output.test.ts`, update failed-result expected strings by replacing:
+In `test/json-output.test.ts`, update every failed-result expected string by replacing:
 
 ```text
 Malformed events: 0
@@ -466,17 +539,15 @@ with:
 Malformed events: 0
 ```
 
-Remove the `MALFORMED_EVENT_SAMPLE_MAX_BYTES` import and all sample-size assertions.
-
 In `README.md`, add this sentence after the `subagent_status` privacy paragraph:
 
 ```md
 Tool-result details contain only bounded renderer metadata and never store complete job snapshots. Malformed protocol records are counted, but their raw text is discarded.
 ```
 
-Keep the existing statement that explicit collection returns the selected result and that uncollected inbox data is memory-only.
+Keep the existing statements about explicit collection and the memory-only inbox.
 
-- [ ] **Step 6: Verify no malformed sample path remains**
+- [ ] **Step 5: Verify the obsolete sample path is gone**
 
 Run:
 
@@ -484,23 +555,22 @@ Run:
 rg -n "malformedEventSamples|malformedSamples|MALFORMED_EVENT_SAMPLE" src test README.md
 ```
 
-Expected: no matches and exit code 1 from `rg`.
+Expected: the only matches are the two deliberate legacy-shaped regression objects in `test/json-output.test.ts` and `test/dashboard.test.ts`. No production match remains.
 
-Then run:
+Run focused verification:
 
 ```bash
 npx tsx --test \
   test/json-output.test.ts \
-  test/process-runner.test.ts \
-  test/job-manager.test.ts \
   test/job-status.test.ts \
-  test/dashboard.test.ts
+  test/dashboard.test.ts \
+  test/tools.test.ts
 npm run typecheck
 ```
 
-Expected: all tests and typecheck PASS.
+Expected: all focused tests and typecheck PASS.
 
-- [ ] **Step 7: Run complete verification**
+- [ ] **Step 6: Run complete verification**
 
 Run:
 
@@ -517,21 +587,17 @@ Expected:
 - TypeScript reports no errors.
 - `git diff --check` reports no whitespace errors.
 
-- [ ] **Step 8: Commit malformed-text removal and documentation**
+- [ ] **Step 7: Commit malformed-sample cleanup and documentation**
 
 ```bash
 git add \
-  src/json-stream.ts \
-  src/process-runner.ts \
-  src/job-manager.ts \
   src/types.ts \
   src/output.ts \
   src/dashboard.ts \
   test/json-output.test.ts \
-  test/process-runner.test.ts \
-  test/job-manager.test.ts \
   test/job-status.test.ts \
   test/dashboard.test.ts \
+  test/tools.test.ts \
   README.md
-git commit -m "fix: discard malformed subagent protocol text"
+git commit -m "fix: remove malformed protocol sample display"
 ```
