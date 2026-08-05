@@ -276,7 +276,6 @@ test("statusJobs returns rich bounded status for one job", async () => {
   runner.started[0]?.resolve(completed("PRIVATE_OUTPUT", {
     stderr: "PRIVATE_STDERR",
     errorMessage: "PRIVATE_ERROR",
-    malformedEventSamples: ["PRIVATE_MALFORMED"],
   }));
   await runner.flush();
 

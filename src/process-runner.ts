@@ -27,7 +27,6 @@ export interface ProcessResult {
   errorMessage?: string;
   errorTruncation?: TextTruncation;
   malformedEventCount: number;
-  malformedEventSamples?: string[];
   outputTruncation?: TextTruncation;
   stderrTruncation?: TextTruncation;
 }
@@ -299,7 +298,6 @@ export class PiProcessRunner implements ProcessRunner {
         errorMessage,
         errorTruncation,
         malformedEventCount: parser.malformedCount,
-        malformedEventSamples: [...parser.malformedSamples],
         outputTruncation,
         stderrTruncation,
       });

@@ -4,7 +4,6 @@ import { JsonLineParser } from "../src/json-stream.ts";
 import {
   CAPTURED_TEXT_MAX_BYTES,
   COLLECTED_OUTPUT_MAX_BYTES,
-  MALFORMED_EVENT_SAMPLE_MAX_BYTES,
   formatCollectedResult,
   truncateUtf8,
 } from "../src/output.ts";
@@ -50,27 +49,19 @@ test("ignores blank records and only treats LF as a record boundary", () => {
 
   assert.deepEqual(parser.push(Buffer.from("\n\r\n{\"first\":true}\r{\"second\":true}\n")), []);
   assert.equal(parser.malformedCount, 1);
-  assert.deepEqual(parser.malformedSamples, ['{"first":true}\r{"second":true}']);
 });
 
-test("counts malformed records and retains three 500-character samples", () => {
+test("counts malformed reasoning records without retaining their text", () => {
   const parser = new JsonLineParser();
-  const oversized = "x".repeat(501);
+  const secret = "PRIVATE_REASONING_TEXT_MUST_NOT_SURVIVE";
 
-  assert.deepEqual(parser.push(Buffer.from(`bad\n${oversized}\nthird\nfourth\n`)), []);
-  assert.equal(parser.malformedCount, 4);
-  assert.deepEqual(parser.malformedSamples, ["bad", "x".repeat(500), "third"]);
-});
-
-test("bounds malformed samples at a UTF-8-safe byte limit", () => {
-  const parser = new JsonLineParser();
-
-  parser.push(Buffer.from(`${"😀".repeat(200)}\n`));
-
-  assert.equal(CAPTURED_TEXT_MAX_BYTES, 50 * 1024);
-  assert.equal(MALFORMED_EVENT_SAMPLE_MAX_BYTES, 500);
-  assert.ok(Buffer.byteLength(parser.malformedSamples[0] ?? "", "utf8") <= MALFORMED_EVENT_SAMPLE_MAX_BYTES);
-  assert.doesNotMatch(parser.malformedSamples[0] ?? "", /\uFFFD/);
+  assert.deepEqual(
+    parser.push(Buffer.from(`{"type":"reasoning","reasoning":"${secret}"\n`)),
+    [],
+  );
+  assert.equal(parser.malformedCount, 1);
+  assert.equal("malformedSamples" in parser, false);
+  assert.doesNotMatch(JSON.stringify(parser), new RegExp(secret, "u"));
 });
 
 test("parses a final unterminated record when finished", () => {
@@ -88,9 +79,6 @@ test("drops an oversized unterminated malformed record before finish and recover
 
   assert.equal(parser.malformedCount, 1);
   assert.equal((parser as unknown as { pending: string }).pending, "");
-  assert.equal(parser.malformedSamples.length, 1);
-  assert.ok(Buffer.byteLength(parser.malformedSamples[0] ?? "", "utf8") <= MALFORMED_EVENT_SAMPLE_MAX_BYTES);
-  assert.doesNotMatch(parser.malformedSamples[0] ?? "", /\uFFFD/);
   assert.deepEqual(parser.push(Buffer.from('{"recovered":true}\n')), [{ recovered: true }]);
   assert.deepEqual(parser.finish(), []);
   assert.equal(parser.malformedCount, 1);

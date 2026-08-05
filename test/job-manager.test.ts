@@ -626,7 +626,6 @@ test("preserves independent process diagnostics on failed jobs", async () => {
     stderr: "stderr warning",
     errorMessage: "assistant error",
     malformedEventCount: 2,
-    malformedEventSamples: ["bad event"],
     outputTruncation: { originalBytes: 60_000, keptBytes: 50 * 1024 },
     stderrTruncation: { originalBytes: 70_000, keptBytes: 50 * 1024 },
   }));
@@ -637,10 +636,12 @@ test("preserves independent process diagnostics on failed jobs", async () => {
     stderr: "stderr warning",
     errorMessage: "assistant error",
     malformedEventCount: 2,
-    malformedEventSamples: ["bad event"],
     outputTruncation: { originalBytes: 60_000, keptBytes: 50 * 1024 },
     stderrTruncation: { originalBytes: 70_000, keptBytes: 50 * 1024 },
   });
+  const stored = manager.get(job.id);
+  assert.equal(stored?.malformedEventCount, 2);
+  assert.equal(stored && "malformedEventSamples" in stored, false);
 });
 
 test("maps rejected process results to failed jobs", async () => {

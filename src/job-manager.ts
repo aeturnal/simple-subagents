@@ -1,6 +1,6 @@
 import { resolveLaunchOptions, type LaunchDefaults, type LaunchOptions } from "./launch-options.js";
 import type { ProcessResult, ProcessRunner, RunningProcess } from "./process-runner.js";
-import { CAPTURED_TEXT_MAX_BYTES, MALFORMED_EVENT_SAMPLE_MAX_BYTES, truncateUtf8 } from "./output.js";
+import { CAPTURED_TEXT_MAX_BYTES, truncateUtf8 } from "./output.js";
 import { decideJobControl, inspectJobState } from "./job-lifecycle.js";
 import { isSettled, type AgentProfile, type Job, type JobRequest, type JobState, type ProgressItem, type UsageStats } from "./types.js";
 
@@ -443,9 +443,6 @@ export class JobManager {
     entry.job.model = result.model;
     entry.job.stopReason = result.stopReason;
     entry.job.malformedEventCount = result.malformedEventCount;
-    entry.job.malformedEventSamples = result.malformedEventSamples
-      ?.slice(0, 3)
-      .map((sample) => truncateUtf8(sample, MALFORMED_EVENT_SAMPLE_MAX_BYTES).text);
     entry.job.outputTruncation = result.outputTruncation ?? output.truncation;
     entry.job.stderrTruncation = result.stderrTruncation ?? stderr.truncation;
 
