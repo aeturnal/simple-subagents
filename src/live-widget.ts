@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, type Component } from "@earendil-works/pi-tui";
+import { sliceByColumn, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { projectJobStatus } from "./job-status.js";
 import type { Job } from "./types.js";
 
@@ -16,7 +16,7 @@ export interface LiveWidgetRenderOptions {
 }
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
-const LINGER_MS = 3_000;
+const LINGER_MS = 5_000;
 
 const isLingering = (job: Readonly<Job>, now: number): boolean =>
   (job.state === "completed" || job.state === "failed" || job.state === "cancelled")
@@ -59,10 +59,30 @@ const formatStats = (job: Readonly<Job>, now: number): string => {
   if (toolUses > 0) parts.push(`${toolUses} tool use${toolUses === 1 ? "" : "s"}`);
   const tokens = Math.max(0, job.usage.input + job.usage.output);
   if (tokens > 0) parts.push(formatTokens(tokens));
+  const model = (job.model ?? job.launchModel)?.split("/").at(-1);
+  if (model) parts.push(model);
   if (job.launchThinkingLevel) parts.push(job.launchThinkingLevel);
   const duration = formatDuration(durationMs(job, now));
   parts.push(job.state === "queued" ? `queued ${duration}` : duration);
   return parts.join(" · ");
+};
+
+const tailToWidth = (text: string, width: number): string => {
+  const safeWidth = Math.max(0, width);
+  const textWidth = visibleWidth(text);
+  return textWidth <= safeWidth ? text : sliceByColumn(text, textWidth - safeWidth, safeWidth, true);
+};
+
+const formatJobRow = (prefix: string, task: string, details: string, width: number): string => {
+  const safeWidth = Math.max(0, width);
+  const prefixWidth = visibleWidth(prefix);
+  if (prefixWidth >= safeWidth) return truncateToWidth(prefix, safeWidth, "");
+
+  const detailsWidth = visibleWidth(details);
+  const taskWidth = safeWidth - prefixWidth - 3 - detailsWidth;
+  if (taskWidth > 0) return `${prefix}  ${truncateToWidth(task, taskWidth)} ${details}`;
+  if (safeWidth >= prefixWidth + 2 + detailsWidth) return `${prefix}  ${details}`;
+  return `${prefix}${tailToWidth(`  ${details}`, safeWidth - prefixWidth)}`;
 };
 
 export function formatLiveWidgetLines(jobs: readonly Job[], options: LiveWidgetRenderOptions): string[] {
@@ -79,8 +99,10 @@ export function formatLiveWidgetLines(jobs: readonly Job[], options: LiveWidgetR
     const isLast = index === visible.length - 1;
     const connector = isLast ? "└─" : "├─";
     const agent = job.state === "running" ? theme.bold(status.agent) : theme.fg("dim", status.agent);
-    const stats = formatStats(job, now);
-    lines.push(`${theme.fg("dim", connector)} ${stateIcon(job, frame, theme)} ${agent}  ${theme.fg("muted", status.task)} ${theme.fg("dim", `· ${stats}`)}`);
+    const prefix = `${theme.fg("dim", connector)} ${stateIcon(job, frame, theme)} ${agent}`;
+    const task = theme.fg("muted", status.task);
+    const details = theme.fg("dim", `· ${formatStats(job, now)}`);
+    lines.push(formatJobRow(prefix, task, details, width));
 
     if (job.state === "running") {
       const activity = status.recentActivity.at(-1)?.summary ?? "thinking…";
