@@ -1,26 +1,25 @@
 # Long-Lived Subagent Sessions Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Complete one task, run its focused verification, review it, and commit it before starting the next task.
 
 **Goal:** Keep each child Pi session open for follow-ups, redirects, structured reports, result collection, and explicit close.
 
-**Architecture:** Run children in Pi 0.82.x RPC mode. Keep process and RPC details in one `SessionRunner`, and keep generation, queue, inbox, result, and capacity rules in one `SubagentManager`. Load one controlled child extension for reporting and graceful shutdown.
+**Architecture:** Run children in Pi 0.82.x RPC mode. Keep process and RPC behavior in `SessionRunner`. Keep open-session, generation, capacity, result, inbox, and help policy in `SubagentManager`. Load one controlled child extension for reporting and graceful shutdown.
 
 **Tech Stack:** TypeScript, Node.js child processes, Pi RPC JSONL, TypeBox, `node:test`, tsx.
 
-## Global Constraints
+## Scope Rules
 
-- Prefer direct code over abstractions. Add no dependencies and no generic RPC framework.
+- Add no dependency, persistence, reconnect support, generic RPC layer, or autonomous child loop.
 - Add only three production modules: `child-extension.ts`, `session-runner.ts`, and `subagent-manager.ts`.
-- Update shared types directly in `types.ts`; keep small lifecycle predicates private.
-- Preserve separate child processes, profile access rules, model/thinking selection, output bounds, and extension isolation.
-- Permit four active generations, eight open sessions, one queued follow-up, and one uncollected result per session.
-- Keep cancel, collect, and discard separate from close.
-- Keep progress inbox-only. Inject help into the parent's next-turn context without starting a parent turn.
-- Do not persist or reconnect children across parent reload, replacement, or exit.
-- Never retain reasoning text or raw malformed RPC records.
-- Do not implement suggestion-box item 18 follow-ups.
-- Every task must leave its focused tests passing and end with an independently reviewable commit.
+- Keep small predicates and internal interfaces inside those modules or `types.ts`.
+- Allow four active generations, eight open sessions, one queued follow-up, and one uncollected result per session.
+- Cancel, collect, and discard never close a session. Only close releases it.
+- Progress is inbox-only. Help is injected into the parent's next-turn context without starting a turn.
+- Reload and exit close all children. Session replacement is blocked until the user confirms close-all.
+- Bound all captured text. Never retain reasoning text or raw malformed RPC records.
+- Do not implement deferred suggestion-box item 18 features.
+- Each task below has one behavioral acceptance target and a focused passing test set.
 
 ## Final File Map
 
@@ -48,7 +47,7 @@
 - `test/integration.test.ts`
 - `README.md`
 
-**Remove after cutover:**
+**Remove only after cutover:**
 
 - `src/process-runner.ts`, `test/process-runner.test.ts`
 - `src/job-manager.ts`, `test/job-manager.test.ts`
@@ -56,753 +55,785 @@
 
 ---
 
-### Task 1: Add long-lived types and the controlled child extension
+## Phase A: Controlled child and RPC transport
 
-**Testable change:** The package defines the new data contract, and an isolated child can intentionally report progress, request help, or shut down.
+### Task 1: Add the controlled child report extension
 
-**Files:**
+**Testable change:** The isolated child exposes exactly one report tool and one internal shutdown command.
 
-- Modify: `src/types.ts`
-- Create: `src/child-extension.ts`
-- Create: `test/child-extension.test.ts`
+**Files:** Modify `src/types.ts`; create `src/child-extension.ts`; create `test/child-extension.test.ts`.
 
-- [ ] **Step 1: Write failing child-extension tests**
-
-```ts
-import assert from "node:assert/strict";
-import test from "node:test";
-import childExtension, { CHILD_SHUTDOWN_COMMAND, REPORT_MAX_BYTES } from "../src/child-extension.ts";
-
-test("progress continues and help terminates the child run", async () => {
-  const tools = new Map<string, any>();
-  const commands = new Map<string, any>();
-  childExtension({
-    registerTool: (tool: any) => tools.set(tool.name, tool),
-    registerCommand: (name: string, command: any) => commands.set(name, command),
-  } as never);
-
-  const report = tools.get("subagent_report");
-  assert.equal((await report.execute("p1", { kind: "progress", message: "halfway" })).terminate, undefined);
-  assert.equal((await report.execute("h1", { kind: "help_request", message: "Which target?" })).terminate, true);
-  assert.equal(REPORT_MAX_BYTES, 4096);
-  assert.ok(commands.has(CHILD_SHUTDOWN_COMMAND));
-});
-
-test("the shutdown command requests graceful shutdown", async () => {
-  let calls = 0;
-  const commands = new Map<string, any>();
-  childExtension({ registerTool() {}, registerCommand: (name: string, command: any) => commands.set(name, command) } as never);
-  await commands.get(CHILD_SHUTDOWN_COMMAND).handler("", { shutdown: () => { calls += 1; } });
-  assert.equal(calls, 1);
-});
-```
-
-- [ ] **Step 2: Run the test and confirm failure**
-
-Run: `npx tsx --test test/child-extension.test.ts`
-
-Expected: FAIL because the module does not exist.
-
-- [ ] **Step 3: Add the essential types directly to `src/types.ts`**
-
-Keep existing profile, request, launch, usage, progress, and truncation types. Add:
-
-```ts
-export type SessionState = "opening" | "open" | "closing" | "closed" | "failed";
-export type WorkState = "queued" | "running" | "cancelling" | "waiting_for_parent" | "completed" | "cancelled" | "failed";
-export type ResultState = "none" | "ready" | "collected" | "discarded";
-export type DeliveryMode = "follow_up" | "redirect";
-export type ReportKind = "progress" | "help_request";
-
-export interface SubagentReport {
-  id: string;
-  generation: number;
-  kind: ReportKind;
-  message: string;
-  timestamp: number;
-  read: boolean;
-}
-
-export interface Generation {
-  number: number;
-  instruction: string;
-  state: WorkState;
-  resultState: ResultState;
-  createdAt: number;
-  startedAt?: number;
-  finishedAt?: number;
-  progress: ProgressItem[];
-  output: string;
-  resultPreview?: string;
-  stderr: string;
-  usage: UsageStats;
-  model?: string;
-  stopReason?: string;
-  errorMessage?: string;
-  outputTruncation?: TextTruncation;
-  stderrTruncation?: TextTruncation;
-  errorTruncation?: TextTruncation;
-  malformedEventCount: number;
-}
-
-export interface SubagentSession {
-  id: string;
-  request: JobRequest;
-  profile: AgentProfile;
-  state: SessionState;
-  createdAt: number;
-  closedAt?: number;
-  generations: Generation[];
-  queuedFollowUp?: { generation: number; instruction: string; createdAt: number };
-  reports: SubagentReport[];
-  reportBytes: number;
-  omittedReports: number;
-  pendingHelpReportId?: string;
-  launchModel?: string;
-  launchThinkingLevel?: ThinkingLevel;
-  launchThinkingSource?: LaunchThinkingSource;
-}
-```
-
-Leave legacy `Job` types until the final cutover.
-
-- [ ] **Step 4: Implement only the report tool and shutdown command**
-
-```ts
-export const REPORT_MAX_BYTES = 4 * 1024;
-export const CHILD_SHUTDOWN_COMMAND = "simple-subagent-shutdown";
-
-export default function childExtension(pi: ExtensionAPI): void {
-  pi.registerTool({
-    name: "subagent_report",
-    label: "Report to Parent",
-    description: "Send a milestone or stop and ask the parent for required context.",
-    promptGuidelines: [
-      "Use subagent_report progress only at meaningful milestones.",
-      "Use subagent_report help_request alone when parent input is required before continuing.",
-    ],
-    parameters: Type.Object({
-      kind: StringEnum(["progress", "help_request"] as const),
-      message: Type.String({ minLength: 1, maxLength: REPORT_MAX_BYTES }),
-    }, { additionalProperties: false }),
-    async execute(_id, input) {
-      const message = truncateUtf8(input.message, REPORT_MAX_BYTES).text;
-      return {
-        content: [{ type: "text", text: input.kind === "help_request" ? "Waiting for parent reply." : "Progress reported." }],
-        details: { kind: input.kind, message },
-        ...(input.kind === "help_request" ? { terminate: true } : {}),
-      };
-    },
-  });
-
-  pi.registerCommand(CHILD_SHUTDOWN_COMMAND, {
-    description: "Internal simple-subagents shutdown command",
-    handler: async (_args, ctx) => { ctx.shutdown(); },
-  });
-}
-```
-
-- [ ] **Step 5: Verify and commit**
+- [ ] Add `ReportKind = "progress" | "help_request"` and the 4 KiB report limit.
+- [ ] Write failing tests asserting progress continues, help returns `terminate: true`, oversized UTF-8 text is bounded, and the shutdown command calls `ctx.shutdown()`.
+- [ ] Register `subagent_report` with strict TypeBox parameters and `simple-subagent-shutdown` with no public workflow behavior.
+- [ ] Run:
 
 ```bash
 npx tsx --test test/child-extension.test.ts
 npm run typecheck
 git add src/types.ts src/child-extension.ts test/child-extension.test.ts
-git commit -m "feat: add persistent subagent types and reporting"
+git commit -m "feat: add controlled child reporting"
 ```
+
+Expected: focused tests and typecheck pass.
 
 ---
 
-### Task 2: Add RPC process launch, commands, and shutdown
+### Task 2: Launch an RPC child and wait for readiness
 
-**Testable change:** A child RPC process can open, accept prompt/steer/abort commands, report command rejection, and close safely. Event capture is intentionally deferred to Task 3.
+**Testable change:** `SessionRunner.open()` spawns the correct isolated Pi command and resolves only after `get_state` succeeds.
 
-**Files:**
+**Files:** Create `src/session-runner.ts`; create `test/session-runner.test.ts`; modify `src/profile-capabilities.ts` and its test.
 
-- Create: `src/session-runner.ts`
-- Create: `test/session-runner.test.ts`
-- Modify: `src/profile-capabilities.ts`
-- Modify: `test/profile-capabilities.test.ts`
-
-**Interfaces:**
-
-```ts
-export interface SessionOpenOptions {
-  cwd: string;
-  request: JobRequest;
-  profile: AgentProfile;
-  launchOptions: LaunchOptions;
-}
-
-export interface SessionExit {
-  expected: boolean;
-  code: number | null;
-  signal?: NodeJS.Signals;
-  error?: string;
-  stderr: string;
-}
-
-export interface RunningSubagentSession {
-  prompt(message: string): Promise<void>;
-  steer(message: string): Promise<void>;
-  abort(): Promise<void>;
-  close(): Promise<void>;
-  readonly closed: Promise<SessionExit>;
-}
-
-export interface SessionRunner {
-  open(options: SessionOpenOptions): Promise<RunningSubagentSession>;
-}
-```
-
-- [ ] **Step 1: Write failing launch and command tests**
-
-Use a fake child with recorded stdin writes, event-emitting stdout/stderr, and recorded signals:
-
-```ts
-const opening = runner.open(openOptions());
-const ready = JSON.parse(child.stdin.writes[0]);
-assert.equal(ready.type, "get_state");
-child.respond(ready.id, "get_state", { isStreaming: false });
-const session = await opening;
-
-const accepted = session.prompt("generation one");
-const prompt = JSON.parse(child.stdin.writes.at(-1));
-assert.deepEqual({ type: prompt.type, message: prompt.message }, { type: "prompt", message: "generation one" });
-child.respond(prompt.id, "prompt");
-await accepted;
-```
-
-Also test `steer`, `abort`, a failed RPC response, pending-command rejection on process exit, and idempotent close.
-
-- [ ] **Step 2: Run tests and confirm failure**
-
-Run: `npx tsx --test test/session-runner.test.ts test/profile-capabilities.test.ts`
-
-Expected: FAIL because the runner and child allowlist do not exist.
-
-- [ ] **Step 3: Add one child allowlist helper**
-
-```ts
-export const getChildLaunchToolAllowlist = (profile: AgentProfile, accessMode: AccessMode): string[] =>
-  [...getLaunchToolAllowlist(profile, accessMode), "subagent_report"];
-```
-
-Keep the base allowlist helper unchanged.
-
-- [ ] **Step 4: Implement command correlation in `session-runner.ts`**
-
-Use the current executable fallback, temp profile prompt, cwd, model, thinking, `shell: false`, and piped stdio. Resolve the controlled extension path with:
-
-```ts
-const childExtensionPath = fileURLToPath(new URL("./child-extension.ts", import.meta.url));
-```
-
-Keep the command map private:
-
-```ts
-const send = (command: Record<string, unknown>): Promise<void> => {
-  const id = `rpc-${nextId++}`;
-  return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject, timer: setCommandTimer(id) });
-    child.stdin.write(`${JSON.stringify({ id, ...command })}\n`);
-  });
-};
-```
-
-At this checkpoint, parse response records only. Ignore non-response events until Task 3. Discard malformed lines without retaining their text. Give command acceptance one injected timeout.
-
-- [ ] **Step 5: Implement bounded process close**
-
-`close()` sends the internal shutdown command, waits for exit, then uses one TERM/KILL fallback. It resolves the single `closed` promise exactly once. Unexpected exit rejects every pending command and returns bounded stderr.
-
-- [ ] **Step 6: Verify and commit**
+- [ ] Define `SessionRunner`, `RunningSubagentSession`, `SessionOpenOptions`, `SessionExit`, `SessionResult`, and the final `SessionEvent` union in `session-runner.ts`.
+- [ ] Add a fake child-process harness that records args, stdin, stderr, signals, and exit.
+- [ ] Write a failing test asserting RPC mode, `--no-session`, `--no-extensions`, the controlled extension path, model, thinking, profile prompt, child tool allowlist, `shell: false`, and piped stdio.
+- [ ] Add `getChildLaunchToolAllowlist()` by appending only `subagent_report` to the existing access-aware allowlist.
+- [ ] Implement spawn plus a bounded `get_state` readiness command. Do not implement prompt or event reduction yet.
+- [ ] Run:
 
 ```bash
 npx tsx --test test/session-runner.test.ts test/profile-capabilities.test.ts
 npm run typecheck
 git add src/session-runner.ts src/profile-capabilities.ts test/session-runner.test.ts test/profile-capabilities.test.ts
-git commit -m "feat: add persistent RPC process control"
+git commit -m "feat: launch persistent RPC children"
 ```
 
 ---
 
-### Task 3: Add normalized RPC activity and settlement events
+### Task 3: Accept the first RPC prompt
 
-**Testable change:** `SessionRunner` converts Pi events into bounded progress, telemetry, structured reports, and one final per-generation result.
+**Testable change:** An open child accepts one prompt command and reports RPC rejection or timeout to the caller.
 
-**Files:**
+**Files:** Modify `src/session-runner.ts` and `test/session-runner.test.ts`.
 
-- Modify: `src/session-runner.ts`
-- Modify: `test/session-runner.test.ts`
-
-**Event contract:**
-
-```ts
-export interface SessionResult {
-  output: string;
-  stderr: string;
-  usage: UsageStats;
-  model?: string;
-  stopReason?: string;
-  errorMessage?: string;
-  malformedEventCount: number;
-  outputTruncation?: TextTruncation;
-  stderrTruncation?: TextTruncation;
-  errorTruncation?: TextTruncation;
-}
-
-export type SessionEvent =
-  | { type: "progress"; item: ProgressItem }
-  | { type: "telemetry"; usage: UsageStats; model?: string }
-  | { type: "report"; reportId: string; kind: ReportKind; message: string; timestamp: number }
-  | { type: "settled"; result: SessionResult };
-
-export interface RunningSubagentSession {
-  subscribe(listener: (event: SessionEvent) => void): () => void;
-}
-```
-
-- [ ] **Step 1: Write failing event-reduction tests**
-
-Verify:
-
-- text deltas form one bounded partial preview;
-- assistant `message_end` replaces partial output with authoritative text;
-- usage accumulates within one generation;
-- tool events use fixed activity labels;
-- `subagent_report` uses `toolCallId`, kind, and bounded message;
-- reasoning deltas produce only `Model reasoning` labels;
-- `agent_settled` emits one result;
-- a new idle prompt resets capture, while steer does not.
-
-Example:
-
-```ts
-const events: SessionEvent[] = [];
-session.subscribe((event) => events.push(event));
-child.event({ type: "tool_execution_start", toolCallId: "r1", toolName: "subagent_report", args: { kind: "progress", message: "halfway" } });
-assert.deepEqual(events.at(-1), {
-  type: "report",
-  reportId: "r1",
-  kind: "progress",
-  message: "halfway",
-  timestamp: now,
-});
-```
-
-- [ ] **Step 2: Run tests and confirm failure**
-
-Run: `npx tsx --test test/session-runner.test.ts`
-
-Expected: FAIL because non-response events are not reduced.
-
-- [ ] **Step 3: Add one private event reducer**
-
-Reduce only required Pi events. Reuse existing UTF-8 capture and usage parsing from `process-runner.ts`. Reset generation capture only after an accepted idle prompt. On `agent_settled`, emit the result and clear active capture.
-
-Malformed records increment a counter but retain no raw sample. Reasoning content is never copied into progress, errors, stderr, or diagnostics.
-
-- [ ] **Step 4: Add cancellation and malformed-data tests**
-
-Assert abort acceptance does not settle work. Only `agent_settled` emits settlement. Split valid JSON across chunks, send multibyte text, and verify malformed reasoning input cannot appear in any normalized event.
-
-- [ ] **Step 5: Verify and commit**
+- [ ] Write failing tests for command ID correlation, successful prompt acceptance, rejected responses, split stdout chunks, and command timeout.
+- [ ] Add one private pending-command map and JSONL line buffer.
+- [ ] Implement `prompt(message)` using `{ type: "prompt", message }`. Resolve on command acceptance, not generation settlement.
+- [ ] Discard malformed response lines without retaining raw text; event handling remains deferred.
+- [ ] Run:
 
 ```bash
-npx tsx --test test/session-runner.test.ts
+npx tsx --test --test-name-pattern="prompt|response|timeout" test/session-runner.test.ts
 npm run typecheck
 git add src/session-runner.ts test/session-runner.test.ts
-git commit -m "feat: normalize persistent subagent events"
+git commit -m "feat: accept RPC child prompts"
 ```
 
 ---
 
-### Task 4: Add manager scheduling, generations, results, and controls
+### Task 4: Add redirect and abort RPC controls
 
-**Testable change:** Eight sessions can remain open, only four work at once, generations continue in context, and result/control rules work without reporting or inbox behavior yet.
+**Testable change:** A running child can accept an urgent steer or cancellation request without being considered settled.
 
-**Files:**
+**Files:** Modify `src/session-runner.ts` and `test/session-runner.test.ts`.
 
-- Create: `src/subagent-manager.ts`
-- Create: `test/subagent-manager.test.ts`
-- Create: `test/helpers/controlled-session.ts`
-
-**Initial public interface:**
-
-```ts
-start(requests, profiles, defaults): SubagentSession[];
-list(): SubagentSession[];
-get(id: string): SubagentSession | undefined;
-send(id: string, message: string, delivery: DeliveryMode): Promise<SubagentSession>;
-cancel(id: string): Promise<SubagentSession>;
-collect(id: string): SubagentSession;
-discard(id: string): SubagentSession;
-close(id: string): Promise<SubagentSession>;
-subscribe(listener): () => void;
-```
-
-- [ ] **Step 1: Create the controlled test runner**
-
-It records prompts, steers, aborts, and closes; exposes `emit(event)`; and resolves `closed` on close.
-
-```ts
-export const settled = (output: string): SessionEvent => ({
-  type: "settled",
-  result: {
-    output,
-    stderr: "",
-    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 1 },
-    stopReason: "stop",
-    malformedEventCount: 0,
-  },
-});
-```
-
-- [ ] **Step 2: Write failing capacity and result-barrier tests**
-
-```ts
-test("opens eight sessions but prompts only four", async () => {
-  const runner = new ControlledRunner();
-  const manager = new SubagentManager({ runner });
-  manager.start(makeRequests(8), profiles, defaults);
-  await runner.flush();
-  assert.equal(runner.sessions.length, 8);
-  assert.equal(runner.sessions.filter((entry) => entry.prompts.length === 1).length, 4);
-  assert.throws(() => manager.start(makeRequests(1), profiles, defaults), /eight open/i);
-});
-
-test("a ready result blocks one queued follow-up", async () => {
-  const { runner, manager, child } = await runningManager();
-  await manager.send("job-1", "generation two", "follow_up");
-  child.emit(settled("generation one"));
-  await runner.flush();
-  assert.equal(child.prompts.length, 1);
-  manager.collect("job-1");
-  await runner.flush();
-  assert.deepEqual(child.prompts, ["Task 1", "generation two"]);
-});
-```
-
-Define the local fixtures explicitly:
-
-```ts
-const profile: AgentProfile = {
-  name: "reviewer",
-  description: "Reviews code",
-  systemPrompt: "Review carefully.",
-  source: "user",
-};
-const profiles = new Map([[profile.name, profile]]);
-const defaults = { cwd: "/workspace", parentModel: "parent/model", thinkingLevel: "high" as const };
-const makeRequests = (count: number): JobRequest[] =>
-  Array.from({ length: count }, (_, index) => ({ task: `Task ${index + 1}`, agent: profile.name, writeAccess: false }));
-
-const runningManager = async () => {
-  const runner = new ControlledRunner();
-  const manager = new SubagentManager({ runner });
-  manager.start(makeRequests(1), profiles, defaults);
-  await runner.flush();
-  return { runner, manager, child: runner.sessions[0]! };
-};
-```
-
-- [ ] **Step 3: Implement the smallest scheduler**
-
-```ts
-private readonly sessions = new Map<string, InternalSession>();
-private readonly ready: string[] = [];
-private readonly active = new Set<string>();
-```
-
-Keep lifecycle predicates private. `pump()` starts FIFO work until four IDs are active. It does not start a queued follow-up while any result is ready. Return structured clones from public reads and subscriptions.
-
-- [ ] **Step 4: Add failing send and control tests**
-
-Verify:
-
-- one follow-up is accepted and a second is rejected;
-- redirect calls steer and keeps the generation number;
-- cancel changes running to cancelling and keeps the active slot until settlement;
-- collect and discard keep the session open and release the result barrier;
-- close cancels active work, clears queued work, closes the child, and is idempotent;
-- open failure or child exit releases capacity and leaves safe output collectable.
-
-- [ ] **Step 5: Implement controls directly**
-
-Do not add a command pattern, state-machine library, retry policy, persistence adapter, or priority queue. Subscribe to runner settlement and exit once per child, update the current generation, notify, and pump.
-
-- [ ] **Step 6: Verify and commit**
+- [ ] Write failing tests asserting `steer(message)` sends `steer`, `abort()` sends `abort`, and neither emits a settlement event.
+- [ ] Implement both methods through the Task 3 command map. Keep them idempotent only where Pi's command contract is idempotent.
+- [ ] Assert a rejected steer or abort rejects its returned promise while leaving the process open.
+- [ ] Run:
 
 ```bash
-npx tsx --test test/subagent-manager.test.ts
+npx tsx --test --test-name-pattern="steer|abort" test/session-runner.test.ts
 npm run typecheck
-git add src/subagent-manager.ts test/subagent-manager.test.ts test/helpers/controlled-session.ts
-git commit -m "feat: schedule persistent subagent generations"
+git add src/session-runner.ts test/session-runner.test.ts
+git commit -m "feat: control active RPC child turns"
 ```
 
 ---
 
-### Task 5: Add manager reports, help flow, wait, and shutdown
+### Task 5: Gracefully close an RPC child
 
-**Testable change:** Children can report progress or request help; inbox reads, wait, close-all, and shutdown work without changing core scheduling code.
+**Testable change:** `close()` requests internal shutdown and applies a bounded TERM/KILL fallback exactly once.
 
-**Files:**
+**Files:** Modify `src/session-runner.ts` and `test/session-runner.test.ts`.
 
-- Modify: `src/subagent-manager.ts`
-- Modify: `test/subagent-manager.test.ts`
-
-**Additional interface:**
-
-```ts
-readInbox(id?: string): SubagentReport[];
-waitFor(options: WaitForOptions): Promise<WaitResult>;
-subscribeEvents(listener): () => void;
-closeAll(): Promise<void>;
-shutdown(): Promise<void>;
-```
-
-- [ ] **Step 1: Write failing progress and help tests**
-
-```ts
-test("progress remains inbox-only", async () => {
-  const { manager, child } = await runningManager();
-  child.emit({ type: "report", reportId: "r1", kind: "progress", message: "halfway", timestamp: 10 });
-  assert.equal(manager.get("job-1")?.generations[0]?.state, "running");
-  assert.deepEqual(manager.readInbox("job-1").map((report) => report.message), ["halfway"]);
-  assert.deepEqual(manager.readInbox("job-1"), []);
-});
-
-test("help waits after settlement and resumes the same generation", async () => {
-  const { runner, manager, child } = await runningManager();
-  child.emit({ type: "report", reportId: "r2", kind: "help_request", message: "Which target?", timestamp: 20 });
-  child.emit(settled("Waiting for parent"));
-  await runner.flush();
-  assert.equal(manager.get("job-1")?.generations[0]?.state, "waiting_for_parent");
-  await manager.send("job-1", "Use target A", "follow_up");
-  assert.equal(manager.get("job-1")?.generations.at(-1)?.number, 1);
-});
-```
-
-- [ ] **Step 2: Implement one bounded inbox method**
-
-Cap each report at 4 KiB with `truncateUtf8(message, 4096)`. Deduplicate by report ID. Keep total report bytes at or below 50 KiB by removing the oldest progress report and incrementing `omittedReports`. Never remove the active help request.
-
-A help report becomes waiting only on the next settlement. A successful reply clears it; a failed prompt leaves it pending. Emit `report_added` once and `session_failed` on unexpected exit.
-
-- [ ] **Step 3: Add failing wait tests**
-
-Wait returns for completed, failed, cancelled, or waiting work. It does not collect, discard, cancel, or close. Preserve current any/all, timeout, and abort semantics.
-
-- [ ] **Step 4: Add failing close-all and shutdown tests**
-
-Verify all open, opening, active, waiting, and idle children close exactly once. Repeated shutdown returns the same promise and never leaves reserved capacity.
-
-- [ ] **Step 5: Implement wait and shutdown using existing manager subscriptions**
-
-Reuse the current event-driven waiter pattern from `job-manager.ts`. Do not add polling, background intervals, durable queues, or a second manager.
-
-- [ ] **Step 6: Verify and commit**
+- [ ] Write failing tests for internal shutdown, clean exit, TERM fallback, KILL fallback, and repeated close.
+- [ ] Implement one `closed` promise and idempotent `close()` path.
+- [ ] Preserve the current signal helpers; do not expose the raw child process.
+- [ ] Run:
 
 ```bash
-npx tsx --test test/subagent-manager.test.ts
+npx tsx --test --test-name-pattern="graceful close|TERM|KILL" test/session-runner.test.ts
+npm run typecheck
+git add src/session-runner.ts test/session-runner.test.ts
+git commit -m "feat: close persistent RPC children"
+```
+
+---
+
+### Task 6: Handle unexpected RPC child exit
+
+**Testable change:** Unexpected process loss rejects pending work and returns one bounded exit record.
+
+**Files:** Modify `src/session-runner.ts` and `test/session-runner.test.ts`.
+
+- [ ] Write failing tests for exit during readiness, exit with pending commands, nonzero exit, signal exit, and bounded stderr.
+- [ ] Resolve `closed` once with `expected: false` and reject every pending command.
+- [ ] Do not treat unexpected exit as graceful close or retain unbounded stderr.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="unexpected exit|pending command|bounded stderr" test/session-runner.test.ts
+npm run typecheck
+git add src/session-runner.ts test/session-runner.test.ts
+git commit -m "feat: report RPC child process loss"
+```
+
+---
+
+## Phase B: Normalized child events
+
+### Task 7: Capture bounded assistant output
+
+**Testable change:** Assistant deltas produce one bounded partial preview, and `message_end` produces authoritative final text.
+
+**Files:** Modify `src/session-runner.ts` and `test/session-runner.test.ts`.
+
+- [ ] Write failing tests for multiple deltas, authoritative replacement, UTF-8 boundaries, and output truncation metadata.
+- [ ] Add only the assistant-output branch of the private event reducer.
+- [ ] Reuse `truncateUtf8`; do not retain duplicate full-message history.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="assistant output|text delta|truncation" test/session-runner.test.ts
+npm run typecheck
+git add src/session-runner.ts test/session-runner.test.ts
+git commit -m "feat: capture bounded RPC output"
+```
+
+---
+
+### Task 8: Normalize safe activity labels
+
+**Testable change:** Tool and reasoning activity is visible through fixed labels without retaining arguments or reasoning text.
+
+**Files:** Modify `src/session-runner.ts` and `test/session-runner.test.ts`.
+
+- [ ] Write failing tests for fixed tool labels, reasoning redaction, unknown tools, and activity ordering.
+- [ ] Emit bounded `progress` events. Map reasoning to `Model reasoning` and discard its content.
+- [ ] Retain no tool arguments except the controlled report handled in Task 10.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="activity|tool label|reasoning" test/session-runner.test.ts
+npm run typecheck
+git add src/session-runner.ts test/session-runner.test.ts
+git commit -m "feat: normalize safe RPC activity"
+```
+
+---
+
+### Task 9: Accumulate model and usage telemetry
+
+**Testable change:** Each generation exposes cumulative model, token, cost, and turn telemetry.
+
+**Files:** Modify `src/session-runner.ts` and `test/session-runner.test.ts`.
+
+- [ ] Write failing tests for model identity, cumulative token/cache counts, cost, turns, and repeated message-end records.
+- [ ] Emit bounded `telemetry` events from authoritative assistant message records.
+- [ ] Keep telemetry separate from output and activity capture.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="telemetry|usage|model identity" test/session-runner.test.ts
+npm run typecheck
+git add src/session-runner.ts test/session-runner.test.ts
+git commit -m "feat: accumulate RPC usage telemetry"
+```
+
+---
+
+### Task 10: Normalize structured child reports
+
+**Testable change:** A controlled report tool call becomes one bounded report event identified by its Pi tool-call ID.
+
+**Files:** Modify `src/session-runner.ts` and `test/session-runner.test.ts`.
+
+- [ ] Write failing tests for progress/help kinds, 4 KiB UTF-8 truncation, missing fields, unrelated tools, and repeated Pi records with the same `toolCallId`.
+- [ ] Emit `{ type: "report", reportId, kind, message, timestamp }` from `subagent_report` start events.
+- [ ] Ignore invalid controlled-report payloads and never fall back to raw tool arguments.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="structured report" test/session-runner.test.ts
+npm run typecheck
+git add src/session-runner.ts test/session-runner.test.ts
+git commit -m "feat: normalize child report events"
+```
+
+---
+
+### Task 11: Settle and reset one generation
+
+**Testable change:** `agent_settled` emits one final generation result; the next idle prompt resets capture, while steer does not.
+
+**Files:** Modify `src/session-runner.ts` and `test/session-runner.test.ts`.
+
+- [ ] Write failing tests for single settlement, duplicate settlement suppression, abort-before-settlement, prompt reset, steer retention, malformed-line count, and safe error bounds.
+- [ ] Emit the final `settled` event with output, stderr, usage, model, stop reason, error, truncation metadata, and malformed count.
+- [ ] Reset capture only after an accepted idle prompt. Never settle merely because abort was accepted.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="settled|reset|malformed" test/session-runner.test.ts
+npm run typecheck
+git add src/session-runner.ts test/session-runner.test.ts
+git commit -m "feat: settle RPC child generations"
+```
+
+---
+
+## Phase C: Session manager policy
+
+### Task 12: Register open sessions and enforce the open limit
+
+**Testable change:** A batch opens atomically when capacity allows, and the ninth open session is rejected before any process starts.
+
+**Files:** Modify `src/types.ts`; create `src/subagent-manager.ts`; create `test/subagent-manager.test.ts`; create `test/helpers/controlled-session.ts`.
+
+- [ ] Add session, generation, work, and result state types to `types.ts`.
+- [ ] Create a controlled runner that records calls and emits normalized events without production test hooks.
+- [ ] Write failing tests for stable IDs, eight accepted opens, atomic ninth rejection, open failure, snapshots, and structured cloning.
+- [ ] Implement only the session registry, `enqueue`, `list`, `get`, and open-capacity accounting. Do not prompt children yet.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="open session|open limit|snapshot" test/subagent-manager.test.ts
+npm run typecheck
+git add src/types.ts src/subagent-manager.ts test/subagent-manager.test.ts test/helpers/controlled-session.ts
+git commit -m "feat: register persistent subagent sessions"
+```
+
+---
+
+### Task 13: Schedule four active generations FIFO
+
+**Testable change:** Eight children may be open, but only the first four generation prompts run until a slot is released.
+
+**Files:** Modify `src/subagent-manager.ts` and `test/subagent-manager.test.ts`.
+
+- [ ] Write failing tests for four active prompts, FIFO start order, settlement releasing one slot, prompt failure releasing one slot, and active-slot retention while cancelling.
+- [ ] Add one ready queue, one active-ID set, and one private `pump()` method.
+- [ ] Prompt generation 1 for at most four sessions. Do not add follow-ups yet.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="active limit|FIFO|slot" test/subagent-manager.test.ts
 npm run typecheck
 git add src/subagent-manager.ts test/subagent-manager.test.ts
-git commit -m "feat: add subagent reports and help flow"
+git commit -m "feat: schedule four active subagents"
 ```
 
 ---
 
-### Task 6: Expose messaging, collection, controls, and bounded status
+### Task 14: Continue generations with follow-up or redirect
 
-**Testable change:** The parent model can send, read, collect, cancel, discard, close, and inspect generation-aware state through stable tools.
+**Testable change:** Follow-up creates the next generation; redirect steers the current generation.
 
-**Files:**
+**Files:** Modify `src/subagent-manager.ts` and `test/subagent-manager.test.ts`.
 
-- Modify: `src/tools.ts`
-- Modify: `src/output.ts`
-- Modify: `src/job-status.ts`
-- Modify: `test/tools.test.ts`
-- Modify: `test/json-output.test.ts`
-- Modify: `test/job-status.test.ts`
-
-- [ ] **Step 1: Update tool test services to use `SubagentManager`**
-
-Import the controlled runner. Keep existing profile, confirmation, clock, renderer, and privacy fixtures.
-
-- [ ] **Step 2: Write failing tool tests**
-
-```ts
-test("send defaults to one queued follow-up", async () => {
-  const result = await sendInstruction({ id: "job-1", message: "Check tests" }, services);
-  assert.match(text(result), /generation 2 queued/i);
-});
-
-test("inbox reads unread reports once", async () => {
-  assert.match(text(await readInbox({ id: "job-1" }, services)), /Which target/);
-  assert.match(text(await readInbox({ id: "job-1" }, services)), /No unread reports/);
-});
-
-test("collect does not close but close does", async () => {
-  await controlJobs({ action: "collect", ids: ["job-1"] }, services);
-  assert.equal(services.manager.get("job-1")?.state, "open");
-  await controlJobs({ action: "close", ids: ["job-1"] }, services);
-  assert.equal(services.manager.get("job-1")?.state, "closed");
-});
-```
-
-- [ ] **Step 3: Add only two new schemas**
-
-```ts
-const SendParams = Type.Object({
-  id: Type.String(),
-  message: Type.String({ minLength: 1, maxLength: 4096 }),
-  delivery: Type.Optional(StringEnum(["follow_up", "redirect"] as const, { default: "follow_up" })),
-}, { additionalProperties: false });
-
-const InboxParams = Type.Object({ id: Type.Optional(Type.String()) }, { additionalProperties: false });
-```
-
-Validate UTF-8 byte length separately. Register `subagent_send`, `subagent_inbox`, and control `close`. Do not add batching, filters, pagination, or message editing.
-
-- [ ] **Step 4: Make collection format one generation**
-
-```text
-# job-1 · generation 2
-Session state: open
-Work state: completed
-## Result
-...
-```
-
-Format before calling collect. Preserve the combined 50 KiB cap and capture notices. Collection releases the full body and unblocks one follow-up.
-
-- [ ] **Step 5: Update the public status projection**
-
-Keep sanitization, three activity items, usage, durations, model/thinking meaning, and private-data boundaries. Add only session state, generation, work state, queued/blocked flags, unread count, result readiness, and bounded pending help.
-
-- [ ] **Step 6: Verify and commit**
+- [ ] Write failing tests for generation numbering, one queued follow-up, second-follow-up rejection, redirect during running work, and redirect rejection while idle.
+- [ ] Implement `send(id, message, delivery)` with `follow_up` as the default policy value.
+- [ ] Follow-up uses a later prompt and consumes scheduler capacity. Redirect uses steer and does not increment generation.
+- [ ] Run:
 
 ```bash
-npx tsx --test test/tools.test.ts test/json-output.test.ts test/job-status.test.ts
+npx tsx --test --test-name-pattern="follow-up|redirect|generation" test/subagent-manager.test.ts
 npm run typecheck
-git add src/tools.ts src/output.ts src/job-status.ts test/tools.test.ts test/json-output.test.ts test/job-status.test.ts
-git commit -m "feat: expose persistent subagent messaging"
+git add src/subagent-manager.ts test/subagent-manager.test.ts
+git commit -m "feat: continue subagent generations"
 ```
 
 ---
 
-### Task 7: Update UI and parent-session lifecycle
+### Task 15: Enforce the result barrier and release results
 
-**Testable change:** Open and waiting sessions are visible, help is delivered once, and parent replacement cannot abandon children.
+**Testable change:** One ready result blocks the queued follow-up until that result is collected or discarded.
 
-**Files:**
+**Files:** Modify `src/subagent-manager.ts` and `test/subagent-manager.test.ts`.
 
-- Modify: `src/live-widget.ts`
-- Modify: `src/dashboard.ts`
-- Modify: `src/index.ts`
-- Modify: `test/live-widget.test.ts`
-- Modify: `test/dashboard.test.ts`
-- Modify: `test/tools.test.ts`
-
-- [ ] **Step 1: Write failing widget and dashboard tests**
-
-Verify running/queued rows, waiting visibility, five-second terminal linger, one idle-open summary line, and session/generation details. Do not add dashboard history or message controls.
-
-- [ ] **Step 2: Implement projection-only UI changes**
-
-Reuse `projectJobStatus()`. Change widget filtering and labels, not timer architecture. Keep dashboard navigation, scrolling, details, and cancel key.
-
-- [ ] **Step 3: Write failing help delivery tests**
-
-Emit one help report and settlement from the controlled runner. Assert:
-
-```ts
-assert.equal(pi.messages.length, 1);
-assert.equal(pi.messages[0].options.deliverAs, "nextTurn");
-assert.equal(pi.messages[0].options.triggerTurn, undefined);
-assert.match(pi.messages[0].message.content, /job-1.*generation 1.*Which target/s);
-assert.deepEqual(pi.notifications, [["job-1 generation 1 needs parent input.", "warning"]]);
-```
-
-Progress emits no parent message. Duplicate reports inject once. Session failure creates only one bounded error notification.
-
-- [ ] **Step 4: Subscribe once per parent session**
-
-```ts
-ctx.ui.notify(`${event.sessionId} generation ${event.generation} needs parent input.`, "warning");
-pi.sendMessage({
-  customType: "simple-subagents-help",
-  content: `${event.sessionId} generation ${event.generation} needs parent input: ${event.message}`,
-  display: true,
-}, { deliverAs: "nextTurn" });
-```
-
-Do not set `triggerTurn`. Remove the subscription during shutdown or replacement.
-
-- [ ] **Step 5: Write failing replacement and shutdown tests**
-
-Declining switch/fork confirmation cancels replacement. Confirmation awaits close-all. Noninteractive replacement cancels. `session_shutdown` closes all without prompting and is idempotent.
-
-- [ ] **Step 6: Add one local close-all guard in `src/index.ts`**
-
-Use it for `session_before_switch` and `session_before_fork`. Keep automatic shutdown separate because reload/exit cannot be cancelled at that stage.
-
-- [ ] **Step 7: Verify and commit**
+- [ ] Write failing tests for ready-result retention, blocked follow-up, collect release, discard release, repeated collect/discard rejection, and session remaining open.
+- [ ] Implement `collect` and `discard`. Neither method closes, cancels, or starts a parent turn.
+- [ ] Keep one full result and one bounded preview. Start the queued follow-up only after the barrier is released.
+- [ ] Run:
 
 ```bash
-npx tsx --test test/live-widget.test.ts test/dashboard.test.ts test/tools.test.ts
+npx tsx --test --test-name-pattern="result barrier|collect|discard" test/subagent-manager.test.ts
 npm run typecheck
-git add src/live-widget.ts src/dashboard.ts src/index.ts test/live-widget.test.ts test/dashboard.test.ts test/tools.test.ts
-git commit -m "feat: guard and display open subagent sessions"
+git add src/subagent-manager.ts test/subagent-manager.test.ts
+git commit -m "feat: retain one subagent result"
 ```
 
 ---
 
-### Task 8: Complete cutover, integration, documentation, and cleanup
+### Task 16: Cancel active work without closing the session
 
-**Testable change:** No legacy path remains, the real opt-in workflow proves context continuation, and full offline verification passes.
+**Testable change:** Cancel requests abort once, retain capacity until settlement, and leave the child open afterward.
 
-**Files:**
+**Files:** Modify `src/subagent-manager.ts` and `test/subagent-manager.test.ts`.
 
-- Modify: `src/types.ts`
-- Modify: `test/integration.test.ts`
-- Modify: `README.md`
-- Remove: legacy files listed in the file map.
+- [ ] Write failing tests for running-to-cancelling transition, one abort call, repeated cancel, settlement to cancelled, queued-work cancellation, and open-session retention.
+- [ ] Implement `cancel(id)` independently from close.
+- [ ] Do not release the active slot on abort acceptance; release it only on settlement or child exit.
+- [ ] Run:
 
-- [ ] **Step 1: Find and remove legacy imports**
+```bash
+npx tsx --test --test-name-pattern="cancel" test/subagent-manager.test.ts
+npm run typecheck
+git add src/subagent-manager.ts test/subagent-manager.test.ts
+git commit -m "feat: cancel subagent work without closing"
+```
+
+---
+
+### Task 17: Explicitly close one session
+
+**Testable change:** Close cancels active work, clears queued work, exits the child, and releases one open-session slot.
+
+**Files:** Modify `src/subagent-manager.ts` and `test/subagent-manager.test.ts`.
+
+- [ ] Write failing tests for idle, active, opening, and repeated close plus queued-follow-up removal.
+- [ ] Implement `close(id)` with one closing-to-closed transition.
+- [ ] Keep close distinct from cancel, collect, and discard.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="explicit close|closing state" test/subagent-manager.test.ts
+npm run typecheck
+git add src/subagent-manager.ts test/subagent-manager.test.ts
+git commit -m "feat: close persistent subagent sessions"
+```
+
+---
+
+### Task 18: Handle unexpected child failure
+
+**Testable change:** Child loss marks the session failed, releases capacity, and preserves bounded collectable partial output.
+
+**Files:** Modify `src/subagent-manager.ts` and `test/subagent-manager.test.ts`.
+
+- [ ] Write failing tests for failure while opening, running, cancelling, and idle plus bounded error and capacity release.
+- [ ] Handle unexpected runner `closed` resolution separately from explicit close.
+- [ ] Preserve safe partial output, usage, truncation, and failure metadata.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="child failure|unexpected close" test/subagent-manager.test.ts
+npm run typecheck
+git add src/subagent-manager.ts test/subagent-manager.test.ts
+git commit -m "feat: retain failed subagent results"
+```
+
+---
+
+### Task 19: Store a bounded progress inbox
+
+**Testable change:** Progress is readable once from a bounded per-session inbox and does not change work state.
+
+**Files:** Modify `src/types.ts`, `src/subagent-manager.ts`, and `test/subagent-manager.test.ts`.
+
+- [ ] Write failing tests for unread/read behavior, per-session and all-session reads, report-ID deduplication, 4 KiB item bounds, 50 KiB total bounds, oldest-progress eviction, and omitted count.
+- [ ] Add reports, report bytes, and omitted-report fields to session snapshots.
+- [ ] Implement `readInbox(id?)`. Emit one internal `report_added` event but no parent message.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="progress inbox|report bounds" test/subagent-manager.test.ts
+npm run typecheck
+git add src/types.ts src/subagent-manager.ts test/subagent-manager.test.ts
+git commit -m "feat: store bounded subagent progress"
+```
+
+---
+
+### Task 20: Pause for help and resume the same generation
+
+**Testable change:** Help becomes waiting after settlement, and the parent's reply resumes the same generation rather than creating another one.
+
+**Files:** Modify `src/types.ts`, `src/subagent-manager.ts`, and `test/subagent-manager.test.ts`.
+
+- [ ] Write failing tests for pending help before settlement, waiting after settlement, help retention during inbox eviction, same-generation reply, failed reply acceptance, and duplicate report IDs.
+- [ ] Add `pendingHelpReportId` and `waiting_for_parent` policy.
+- [ ] Treat the next follow-up while waiting as the help reply. Clear pending help only after prompt acceptance.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="help request|waiting for parent|help reply" test/subagent-manager.test.ts
+npm run typecheck
+git add src/types.ts src/subagent-manager.ts test/subagent-manager.test.ts
+git commit -m "feat: pause subagents for parent help"
+```
+
+---
+
+### Task 21: Wait for session work without consuming it
+
+**Testable change:** `waitFor()` observes terminal or waiting work with any/all, timeout, and abort behavior but performs no control action.
+
+**Files:** Modify `src/subagent-manager.ts` and `test/subagent-manager.test.ts`.
+
+- [ ] Port focused wait tests for immediate result, any, all, timeout, abort, unknown IDs, and waiting-for-parent.
+- [ ] Implement wait using manager subscriptions and injected timers, not polling.
+- [ ] Assert waiting never collects, discards, cancels, closes, or marks inbox entries read.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="waitFor|wait for" test/subagent-manager.test.ts
+npm run typecheck
+git add src/subagent-manager.ts test/subagent-manager.test.ts
+git commit -m "feat: wait for persistent subagent work"
+```
+
+---
+
+### Task 22: Close all sessions during manager shutdown
+
+**Testable change:** `closeAll()` and `shutdown()` close every opening, active, waiting, idle, and failed-but-open child exactly once.
+
+**Files:** Modify `src/subagent-manager.ts` and `test/subagent-manager.test.ts`.
+
+- [ ] Write failing tests for mixed-state close-all, repeated calls, concurrent calls, no open sessions, and final zero capacity.
+- [ ] Implement one shared in-flight shutdown promise. Await all child closes with `Promise.allSettled`.
+- [ ] Keep `closeAll()` callable by parent replacement and `shutdown()` callable by extension exit.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="closeAll|shutdown" test/subagent-manager.test.ts
+npm run typecheck
+git add src/subagent-manager.ts test/subagent-manager.test.ts
+git commit -m "feat: close all persistent subagents"
+```
+
+---
+
+## Phase D: Public tools and presentation
+
+### Task 23: Project bounded generation-aware status
+
+**Testable change:** Status functions expose current session/generation state without exposing output, stderr, prompts, or raw errors.
+
+**Files:** Modify `src/job-status.ts` and `test/job-status.test.ts`.
+
+- [ ] Add tests for session state, generation number, work state, queue/result flags, unread count, bounded pending help, model/thinking, usage, durations, and three-item activity cap.
+- [ ] Add a temporary overload accepting both legacy `Job` and new `SubagentSession` so this commit typechecks before runtime cutover.
+- [ ] Preserve terminal sanitization and privacy boundaries.
+- [ ] Run:
+
+```bash
+npx tsx --test test/job-status.test.ts
+npm run typecheck
+git add src/job-status.ts test/job-status.test.ts
+git commit -m "feat: project persistent subagent status"
+```
+
+---
+
+### Task 24: Format one generation result
+
+**Testable change:** Collection formats one generation with bounded output, capture notices, usage, and open-session state.
+
+**Files:** Modify `src/output.ts` and `test/json-output.test.ts`.
+
+- [ ] Add tests for generation heading, session/work states, result/error sections, model/thinking, truncation notices, and combined 50 KiB cap.
+- [ ] Add a temporary formatter overload for legacy `Job` until Task 35 removes the old path.
+- [ ] Keep formatting pure: it must not mutate result state or close a session.
+- [ ] Run:
+
+```bash
+npx tsx --test test/json-output.test.ts
+npm run typecheck
+git add src/output.ts test/json-output.test.ts
+git commit -m "feat: format subagent generation results"
+```
+
+---
+
+### Task 25: Cut existing tools and runtime construction to `SubagentManager`
+
+**Testable change:** Existing agents, run, status, wait, cancel, collect, and discard workflows use the persistent manager without adding the new tools yet.
+
+**Files:** Modify `src/tools.ts`, `src/index.ts`, and `test/tools.test.ts`.
+
+- [ ] Replace tool-test process fixtures with the controlled session runner and update existing assertions for session/generation snapshots.
+- [ ] Change `ToolServices.manager`, start/status/wait/control calls, and extension construction from `JobManager`/`PiProcessRunner` to `SubagentManager`/`PiRpcSessionRunner`.
+- [ ] Keep existing tool names and request schemas unchanged in this task.
+- [ ] Assert completed work remains open after collect and session shutdown calls manager shutdown.
+- [ ] Run:
+
+```bash
+npx tsx --test test/tools.test.ts
+npm run typecheck
+git add src/tools.ts src/index.ts test/tools.test.ts
+git commit -m "refactor: use persistent manager for existing tools"
+```
+
+---
+
+### Task 26: Add the send tool
+
+**Testable change:** The parent can submit one follow-up or one urgent redirect through a strict public schema.
+
+**Files:** Modify `src/tools.ts` and `test/tools.test.ts`.
+
+- [ ] Add the `subagent_send` schema and validate UTF-8 byte length separately.
+- [ ] Test default follow-up, explicit redirect, queued/rejected replies, unknown IDs, and private tool details.
+- [ ] Add no batch sending or message editing.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="subagent_send" test/tools.test.ts
+npm run typecheck
+git add src/tools.ts test/tools.test.ts
+git commit -m "feat: expose subagent send tool"
+```
+
+---
+
+### Task 27: Add the inbox tool
+
+**Testable change:** The parent can read unread progress/help reports once for one or all sessions.
+
+**Files:** Modify `src/tools.ts` and `test/tools.test.ts`.
+
+- [ ] Add the strict `subagent_inbox` schema.
+- [ ] Test one-session reads, all-session reads, empty reads, read-once behavior, omitted count, and private details.
+- [ ] Add no filters, pagination, or history API.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="subagent_inbox" test/tools.test.ts
+npm run typecheck
+git add src/tools.ts test/tools.test.ts
+git commit -m "feat: expose subagent inbox tool"
+```
+
+---
+
+### Task 28: Add explicit close control
+
+**Testable change:** The control tool can explicitly close sessions, while cancel, collect, and discard continue to leave them open.
+
+**Files:** Modify `src/tools.ts` and `test/tools.test.ts`.
+
+- [ ] Add failing tests for close on idle, running, and already-closed sessions, plus non-closing cancel/collect/discard assertions.
+- [ ] Add `close` to the control schema, execution switch, summary, and renderer.
+- [ ] Keep close confirmation policy unchanged; parent replacement confirmation belongs to Task 33.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="control close|keeps session open" test/tools.test.ts
+npm run typecheck
+git add src/tools.ts test/tools.test.ts
+git commit -m "feat: expose explicit subagent close"
+```
+
+---
+
+### Task 29: Wire generation-aware collection
+
+**Testable change:** Collection formats the ready generation before releasing it and then permits one queued follow-up to start.
+
+**Files:** Modify `src/tools.ts`, `src/output.ts`, `test/tools.test.ts`, and `test/json-output.test.ts`.
+
+- [ ] Add failing tests for ready-generation selection, format-before-release, bounded payload, repeated collection rejection, and queued-work release.
+- [ ] Format the selected ready generation, then call manager collect. Do not close the session.
+- [ ] Keep discard output-free and preserve the formatter behavior proven in Task 24.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="generation collection|result release" test/tools.test.ts test/json-output.test.ts
+npm run typecheck
+git add src/tools.ts src/output.ts test/tools.test.ts test/json-output.test.ts
+git commit -m "feat: collect subagent generations"
+```
+
+---
+
+### Task 30: Display persistent sessions in the live widget
+
+**Testable change:** The compact widget distinguishes active, queued, waiting, terminal-linger, and idle-open sessions.
+
+**Files:** Modify `src/live-widget.ts` and `test/live-widget.test.ts`.
+
+- [ ] Test running/queued rows, waiting visibility, five-second terminal linger, and one idle-open summary line.
+- [ ] Reuse `projectJobStatus()` and preserve timer ownership.
+- [ ] Do not add interaction or new timers.
+- [ ] Run:
+
+```bash
+npx tsx --test test/live-widget.test.ts
+npm run typecheck
+git add src/live-widget.ts test/live-widget.test.ts
+git commit -m "feat: display persistent sessions in widget"
+```
+
+---
+
+### Task 31: Display persistent sessions in the dashboard
+
+**Testable change:** Dashboard rows and details show generation, work, result, queue, and unread-report state.
+
+**Files:** Modify `src/dashboard.ts` and `test/dashboard.test.ts`.
+
+- [ ] Test idle/waiting rows, generation details, unread/result indicators, and safe bounded previews.
+- [ ] Preserve navigation, scrolling, detail modes, and the existing cancel key.
+- [ ] Add no history, send controls, or keybindings.
+- [ ] Run:
+
+```bash
+npx tsx --test test/dashboard.test.ts
+npm run typecheck
+git add src/dashboard.ts test/dashboard.test.ts
+git commit -m "feat: display persistent sessions in dashboard"
+```
+
+---
+
+## Phase E: Parent lifecycle
+
+### Task 32: Deliver help into the parent's next-turn context
+
+**Testable change:** A help event notifies the human and injects one bounded next-turn message without starting a turn.
+
+**Files:** Modify `src/index.ts` and `test/tools.test.ts`.
+
+- [ ] Add tests for one warning, `deliverAs: "nextTurn"`, no `triggerTurn`, duplicate suppression, no progress injection, bounded failure notification, and listener cleanup.
+- [ ] Subscribe once to manager events during parent-session startup.
+- [ ] Send a visible custom message containing session ID, generation, and bounded help text.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="parent help|next-turn" test/tools.test.ts
+npm run typecheck
+git add src/index.ts test/tools.test.ts
+git commit -m "feat: deliver subagent help to parent"
+```
+
+---
+
+### Task 33: Guard switch and fork replacement
+
+**Testable change:** A parent switch or fork cannot abandon open child sessions.
+
+**Files:** Modify `src/index.ts` and `test/tools.test.ts`.
+
+- [ ] Test declined and accepted `session_before_switch`, declined and accepted `session_before_fork`, and noninteractive cancellation.
+- [ ] Add one local confirmation helper that awaits `closeAll()` before permitting replacement.
+- [ ] Do not change reload or exit handling in this task.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="session_before_switch|session_before_fork" test/tools.test.ts
+npm run typecheck
+git add src/index.ts test/tools.test.ts
+git commit -m "feat: guard parent session replacement"
+```
+
+---
+
+### Task 34: Close children during parent shutdown
+
+**Testable change:** Parent reload or exit closes all child sessions and removes manager event listeners without prompting.
+
+**Files:** Modify `src/index.ts` and `test/tools.test.ts`.
+
+- [ ] Test `session_shutdown` with running, waiting, and idle children; repeated shutdown; close failure; and listener cleanup.
+- [ ] Await manager shutdown without asking for confirmation because shutdown cannot be cancelled at this stage.
+- [ ] Keep switch/fork confirmation behavior unchanged from Task 33.
+- [ ] Run:
+
+```bash
+npx tsx --test --test-name-pattern="session_shutdown|listener cleanup" test/tools.test.ts
+npm run typecheck
+git add src/index.ts test/tools.test.ts
+git commit -m "feat: close subagents on parent shutdown"
+```
+
+---
+
+## Phase F: Cutover and verification
+
+### Task 35: Remove the legacy one-shot implementation
+
+**Testable change:** Production and offline tests contain no legacy manager, runner, lifecycle, or one-shot type path.
+
+**Files:** Modify `src/types.ts` and any remaining imports; remove the six legacy source/test files listed above.
+
+- [ ] Run this inventory before deleting anything:
 
 ```bash
 rg -n 'JobManager|PiProcessRunner|JobState|process-runner|job-manager|job-lifecycle' src test
 ```
 
-Update every remaining import. Remove legacy `Job` types only after no consumer remains. Delete only the six replaced files.
+- [ ] Move any still-relevant assertion into the new focused tests, remove temporary legacy overloads, then delete only the listed files.
+- [ ] Verify no matches remain and the complete offline suite passes:
 
-- [ ] **Step 2: Update the opt-in real integration test**
+```bash
+npm test
+npm run typecheck
+rg -n 'JobManager|PiProcessRunner|JobState|process-runner|job-manager|job-lifecycle' src test && exit 1 || true
+git add src test
+git commit -m "refactor: remove one-shot subagent path"
+```
 
-Open one read-only RPC child, collect generation 1, send one follow-up using retained context, collect generation 2, close, and assert no writable tools or live process remain.
+---
 
-Run when credentials are available:
+### Task 36: Prove context continuation with the opt-in integration test
+
+**Testable change:** A real read-only child answers generation 1, uses retained context in generation 2, and closes cleanly.
+
+**Files:** Modify `test/integration.test.ts`.
+
+- [ ] Update the test to open one RPC child, read `answer.txt`, collect generation 1, send a context-dependent follow-up, collect generation 2, and close.
+- [ ] Assert no writable tools were enabled and the child process exited.
+- [ ] Keep the test skipped unless `SIMPLE_SUBAGENTS_INTEGRATION=1` is set.
+- [ ] Run when credentials are available:
 
 ```bash
 SIMPLE_SUBAGENTS_INTEGRATION=1 npx tsx --test test/integration.test.ts
 ```
 
-Keep normal tests offline.
+If credentials are unavailable, run the normal skipped form and record that limitation:
 
-- [ ] **Step 3: Update README with exact usage**
-
-```ts
-subagent_send({ id: "job-1", message: "Check the failing tests" })
-subagent_send({ id: "job-1", message: "Inspect auth first", delivery: "redirect" })
-subagent_inbox({ id: "job-1" })
-subagent_control({ action: "collect", ids: ["job-1"] })
-subagent_control({ action: "close", ids: ["job-1"] })
+```bash
+npx tsx --test test/integration.test.ts
 ```
 
-State that cancel, collect, and discard keep sessions open; only close releases them; one follow-up and one result are retained; replacement is guarded; reload/exit closes all.
+- [ ] Commit:
 
-- [ ] **Step 4: Run complete verification**
+```bash
+git add test/integration.test.ts
+git commit -m "test: cover persistent subagent context"
+```
+
+---
+
+### Task 37: Document the public lifecycle
+
+**Testable change:** README examples and stated limits match the implemented tool schemas and behavior.
+
+**Files:** Modify `README.md`.
+
+- [ ] Document send, redirect, inbox, collect, discard, cancel, and close with exact tool examples.
+- [ ] State the four-active/eight-open limits, one-follow-up/one-result bounds, help behavior, replacement confirmation, and reload/exit shutdown.
+- [ ] Check every documented tool name and control action against `src/tools.ts`:
+
+```bash
+rg -n 'subagent_(run|send|inbox|status|wait|control)|follow_up|redirect|collect|discard|cancel|close' README.md src/tools.ts
+npm run typecheck
+git diff --check
+git add README.md
+git commit -m "docs: explain persistent subagent sessions"
+```
+
+---
+
+## Final Verification Gate
+
+This is a review gate, not another implementation task.
+
+- [ ] Run:
 
 ```bash
 npm test
@@ -810,29 +841,21 @@ npm run typecheck
 git diff --check
 ```
 
-Run `lsp_diagnostics` on all changed TypeScript files, then `lens_diagnostics({ mode: "all" })`.
+- [ ] Run `lsp_diagnostics` on every changed TypeScript file and `lens_diagnostics({ mode: "all" })`.
+- [ ] Review the final diff against `docs/superpowers/specs/2026-08-07-long-lived-subagent-sessions-design.md` and confirm no deferred item 18 feature was added.
+- [ ] Confirm `git status --short` contains no unintended files.
 
-Expected: all checks pass and no legacy one-shot import remains.
+## Final Acceptance Checklist
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add src test README.md
-git commit -m "feat: keep subagent sessions open for follow-up work"
-```
-
----
-
-## Final Review Checklist
-
-- [ ] Every child stays open after terminal work.
-- [ ] Four-active and eight-open limits hold through cancellation.
-- [ ] Only one follow-up and one uncollected result are retained.
-- [ ] Redirect and help reply keep the current generation.
-- [ ] Progress is inbox-only; help injects once without starting a turn.
-- [ ] Cancel, collect, and discard keep the child open.
-- [ ] Close cancels active work and exits the child.
-- [ ] Parent replacement cannot abandon children; reload/exit closes them.
-- [ ] All text and protocol capture remains bounded and private.
-- [ ] No deferred item 18 feature or shallow lifecycle/type module was added.
-- [ ] `npm test` and `npm run typecheck` pass.
+- [ ] Every child remains open after terminal work.
+- [ ] Four-active and eight-open limits hold through cancellation and failure.
+- [ ] Only one queued follow-up and one uncollected result are retained.
+- [ ] Follow-up creates a generation; redirect and help reply do not.
+- [ ] Progress is inbox-only; help injects once without starting a parent turn.
+- [ ] Wait, cancel, collect, and discard do not close.
+- [ ] Explicit close and parent shutdown exit children safely.
+- [ ] Replacement cannot abandon open children.
+- [ ] Output, stderr, errors, reports, and inbox totals are bounded.
+- [ ] Reasoning text and malformed raw records are never retained.
+- [ ] No legacy one-shot path or deferred enhancement remains.
+- [ ] Offline tests, typecheck, diff check, LSP diagnostics, and lens diagnostics pass.
